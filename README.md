@@ -110,6 +110,11 @@ run `python scripts/prepare_release.py` with Python 3.11 or newer to create loca
 JAR, source and checksum assets under `dist/`. The packager includes only the
 committed public files and checks that the JARs match the current build inputs.
 
+GitHub Actions builds and packages the same source on Linux and Windows, with a
+production Mixin loading check on Windows. Each successful run retains verified
+release assets for 30 days. Public releases use assets from a successful run;
+publishing remains a separate step.
+
 ## Repository layout
 
 | Path | Purpose |
