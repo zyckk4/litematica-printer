@@ -10,3 +10,16 @@ build.number
 run/
 .idea/
 .DS_Store
+
+# Local dependency inputs and generated development jars.
+v1_21_11/libs/named/*.jar
+v1_21_11/libs/original/*.jar
+
+# Local release bundles, source snapshots and preparation logs.
+dist/
+.local/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
