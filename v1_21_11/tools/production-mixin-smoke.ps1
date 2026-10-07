@@ -39,7 +39,8 @@ $versionInfo = Get-Content -Raw -LiteralPath (Join-Path $GradleUserHome 'caches/
 $classpath = @($loader, $minecraft)
 foreach ($library in $versionInfo.libraries) {
     # Platform native bundles and macOS bridge are unused by a class-load check.
-    if ($library.name -match ':natives-' -or $library.name -like 'ca.weblite:*') { continue }
+    if ($library.name -match ':natives-|^io\.netty:netty-transport-native-(epoll|kqueue):' -or
+            $library.name -like 'ca.weblite:*') { continue }
     $classpath += Cached-Jar $library.name
 }
 foreach ($asm in @('asm', 'asm-analysis', 'asm-commons', 'asm-tree', 'asm-util')) { $classpath += Cached-Jar "org.ow2.asm:${asm}:9.9" }
