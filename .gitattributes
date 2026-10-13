@@ -1,22 +1,29 @@
-# text stuff
-* text=auto
+# Normalize source and build-input bytes across local and CI checkouts.
+* text=auto eol=lf
 *.bat text eol=crlf
 *.groovy text eol=lf
-*.java text eol=crlf
-*.md text
+*.java text eol=lf
+*.kts text eol=lf
+*.json text eol=lf
+*.md text eol=lf
 *.properties text eol=lf
+*.ps1 text eol=lf
+*.py text eol=lf
 *.scala text eol=lf
 *.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.accesswidener text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf
 build.gradle text eol=lf
 gradlew text eol=lf
-gradle/wrapper/gradle-wrapper.properties text eol=crlf
+gradle/wrapper/gradle-wrapper.properties text eol=lf
 COPYING.txt text eol=lf
 COPYING.LESSER.txt text eol=lf
 README.md text eol=lf
 
-#binary
+# Binary files must retain their original bytes.
 *.dat binary
 *.bin binary
 *.png binary

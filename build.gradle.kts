@@ -11,15 +11,15 @@ subprojects {
     }
 }
 
-// This branch builds only the native Minecraft 1.21.11 module.
+// This branch builds only the native Minecraft 1.21.4 module.
 tasks.named("build") {
-    dependsOn(":v1_21_11:build")
+    dependsOn(":v1_21_4:build")
 }
 
 tasks.named("check") {
-    dependsOn(":v1_21_11:check")
+    dependsOn(":v1_21_4:check")
 }
 
 tasks.named("clean") {
-    dependsOn(":v1_21_11:clean")
+    dependsOn(":v1_21_4:clean")
 }

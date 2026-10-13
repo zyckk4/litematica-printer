@@ -1,11 +1,14 @@
-# Litematica Printer — Minecraft 1.21.11
+# Litematica Printer — Minecraft 1.21.4
 
 A Fabric printer extension for Litematica, optimized specifically for the current
-2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
-native placement and movement handling, without a protocol downgrade.
+2b2t server version and environment. This branch targets the **Minecraft 1.21.4 client**
+connecting directly to 2b2t, with native placement and movement handling. No
+client-side Via mod is required.
 
-Version: **3.4.2**. The `1.21.11` branch contains the native implementation;
-the earlier implementation is maintained separately on `1.21.4`.
+Version: **3.4.2**. The `1.21.4` branch ports the native printer logic from the
+`1.21.11` branch, preserving its placement, movement and interaction behavior for
+blocks supported by Minecraft 1.21.4. The earlier 1.21.4 implementation remains
+available in Git history; the `1.21.11` branch targets the newer client separately.
 
 ## Features
 
@@ -24,13 +27,13 @@ the earlier implementation is maintained separately on `1.21.4`.
 
 Requirements:
 
-- Minecraft **1.21.11** and Java **21**.
+- Minecraft **1.21.4** and Java **21**.
 - Fabric Loader **0.18.2 or newer**.
-- [Litematica 0.26.16](https://modrinth.com/mod/litematica/version/mengBR9D).
-- [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
+- [Litematica 0.21.7](https://modrinth.com/mod/litematica/version/Z7jnVo9V).
+- [MaLiLib 0.23.5](https://modrinth.com/mod/malilib/version/ifi4uRpL).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.2-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.2-mc1.21.4.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -97,10 +100,10 @@ In Windows PowerShell:
 
 The build downloads the pinned dependencies, verifies their hashes and prepares
 development inputs automatically. The first build needs network access.
-[Tool instructions](v1_21_11/tools/README.md) cover local dependency files,
+[Tool instructions](v1_21_4/tools/README.md) cover local dependency files,
 offline builds and the production Mixin loading check.
 
-Output is under `v1_21_11/build/libs/`. Install the remapped printer JAR; the
+Output is under `v1_21_4/build/libs/`. Install the remapped printer JAR; the
 `-sources.jar` is for development. `check` and `build` run the native regression
 harness under Fabric Knot. These checks verify code and loading behavior;
 gameplay and server acceptance require a client test.
@@ -119,10 +122,10 @@ publishing remains a separate step.
 
 | Path | Purpose |
 | --- | --- |
-| `v1_21_11/src/main` | Native printer implementation |
-| `v1_21_11/src/test` | Native regression harness |
-| `v1_21_11/tools` | Dependency remapping and production smoke tools |
-| `v1_21_11/libs/README.md` | Pinned dependency versions and checksums |
+| `v1_21_4/src/main` | Native printer implementation |
+| `v1_21_4/src/test` | Native regression harness |
+| `v1_21_4/tools` | Dependency remapping and production smoke tools |
+| `v1_21_4/libs/README.md` | Pinned dependency versions and checksums |
 | `scripts` | Release packaging tools |
 
 Report issues at [zyckk4/litematica-printer](https://github.com/zyckk4/litematica-printer/issues).

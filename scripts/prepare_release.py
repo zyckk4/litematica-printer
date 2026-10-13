@@ -28,17 +28,17 @@ def public_path(relative):
         "gradle.properties", "gradlew", "gradlew.bat", "settings.gradle",
         "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties",
         ".github/workflows/build.yml", "scripts/prepare_release.py",
-        "v1_21_11/build.gradle.kts", "v1_21_11/gradle.properties",
-        "v1_21_11/libs/README.md", "v1_21_11/tools/README.md",
-        "v1_21_11/tools/RemapRealMods.java",
-        "v1_21_11/tools/ProductionMixinSmoke.java",
-        "v1_21_11/tools/remap-runtime-dependencies.ps1",
-        "v1_21_11/tools/production-mixin-smoke.ps1",
+        "v1_21_4/build.gradle.kts", "v1_21_4/gradle.properties",
+        "v1_21_4/libs/README.md", "v1_21_4/tools/README.md",
+        "v1_21_4/tools/RemapRealMods.java",
+        "v1_21_4/tools/ProductionMixinSmoke.java",
+        "v1_21_4/tools/remap-runtime-dependencies.ps1",
+        "v1_21_4/tools/production-mixin-smoke.ps1",
     }:
         return True
-    if relative.startswith(("v1_21_11/src/main/java/", "v1_21_11/src/test/java/")):
+    if relative.startswith(("v1_21_4/src/main/java/", "v1_21_4/src/test/java/")):
         return path.suffix == ".java"
-    if relative.startswith("v1_21_11/src/main/resources/"):
+    if relative.startswith("v1_21_4/src/main/resources/"):
         return path.suffix in {".json", ".png", ".accesswidener"}
     return False
 
@@ -54,22 +54,22 @@ def main():
     if git("status", "--porcelain"):
         raise SystemExit("Commit the reviewed public files and build from a clean working tree first.")
     properties = {}
-    for line in (ROOT / "v1_21_11/gradle.properties").read_text().splitlines():
+    for line in (ROOT / "v1_21_4/gradle.properties").read_text().splitlines():
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.split("=", 1)
             properties[key.strip()] = value.strip()
     version = properties["mod_version"]
     minecraft = properties["minecraft_version"]
     stem = f"litematica-printer-{version}-mc{minecraft}"
-    build = ROOT / "v1_21_11/build/libs"
+    build = ROOT / "v1_21_4/build/libs"
     artifacts = [build / f"{stem}.jar", build / f"{stem}-sources.jar"]
     input_files = {
-        "v1_21_11/build.gradle.kts", "v1_21_11/gradle.properties", "build.gradle.kts",
+        "v1_21_4/build.gradle.kts", "v1_21_4/gradle.properties", "build.gradle.kts",
         "settings.gradle", "gradle.properties", "gradlew", "gradlew.bat",
         "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties",
         "LICENSE.md",
     }
-    for directory in ("v1_21_11/src/main", "v1_21_11/src/test", "v1_21_11/tools"):
+    for directory in ("v1_21_4/src/main", "v1_21_4/src/test", "v1_21_4/tools"):
         input_files.update(path.relative_to(ROOT).as_posix()
                            for path in (ROOT / directory).rglob("*") if path.is_file())
     built_fingerprint = None
@@ -147,10 +147,11 @@ def main():
         shutil.copyfile(ROOT / "LICENSE.md", staging / "LICENSE.md")
         (staging / "BUILD.json").write_text(
             json.dumps({key: value for key, value in source_manifest.items()
-                        if key != "source_files_sha256"}, indent=2) + "\n", encoding="utf-8")
+                        if key != "source_files_sha256"}, indent=2) + "\n", encoding="utf-8", newline="\n")
         asset_names = [artifact.name for artifact in artifacts] + [source_zip.name, "LICENSE.md", "BUILD.json"]
         (staging / "SHA256SUMS.txt").write_text(
-            "".join(f"{sha256(staging / name)}  {name}\n" for name in asset_names), encoding="utf-8")
+            "".join(f"{sha256(staging / name)}  {name}\n" for name in asset_names),
+            encoding="utf-8", newline="\n")
         staging.rename(output)
     print(f"Local release assets: {output}")
     print(f"Source commit: {source_manifest['git_commit']} ({len(source_files)} public files)")

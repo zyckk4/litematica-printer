@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "litematica_printer",
+  "version": "${version}",
+  "name": "Litematica Printer",
+  "description": "A maintained fork of Litematica Printer for Minecraft 1.21.4",
+  "authors": [
+    "aleksilassila",
+    "IceTank",
+    "zyckk4"
+  ],
+  "contact": {
+    "homepage": "https://github.com/zyckk4/litematica-printer",
+    "sources": "https://github.com/zyckk4/litematica-printer",
+    "issues": "https://github.com/zyckk4/litematica-printer/issues"
+  },
+  "license": "AGPL-3.0-only",
+  "icon": "assets/modid/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "main": [
+      "me.aleksilassila.litematica.printer.v1_21_4.LitematicaMixinMod"
+    ]
+  },
+  "mixins": [
+    "litematica-printer.mixins.json",
+    "litematica-printer-implementation.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.2",
+    "minecraft": "1.21.4",
+    "malilib": ">=0.23.5 <0.24.0",
+    "litematica": ">=0.21.7 <0.22.0",
+    "java": ">=21"
+  },
+  "accessWidener": "litematica-printer.accesswidener"
+}

@@ -1,10 +1,10 @@
-name: Native 1.21.11 build
+name: Native 1.21.4 build
 
 on:
   push:
-    branches: ['1.21.11']
+    branches: ['1.21.4']
   pull_request:
-    branches: ['1.21.11']
+    branches: ['1.21.4']
   workflow_dispatch:
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
         with:
           cache-provider: basic
-          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/1.21.11' }}
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/1.21.4' }}
       - name: Build and run native regressions
         shell: bash
         run: ./gradlew clean check build --no-daemon --console=plain
@@ -44,15 +44,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: >-
-          ./v1_21_11/tools/production-mixin-smoke.ps1
-          -LitematicaJar ./v1_21_11/build/native-dependencies/original/litematica-fabric-1.21.11-0.26.16.jar
-          -MalilibJar ./v1_21_11/build/native-dependencies/original/malilib-fabric-1.21.11-0.27.20.jar
+          ./v1_21_4/tools/production-mixin-smoke.ps1
+          -LitematicaJar ./v1_21_4/build/native-dependencies/original/litematica-fabric-1.21.4-0.21.7.jar
+          -MalilibJar ./v1_21_4/build/native-dependencies/original/malilib-fabric-1.21.4-0.23.5.jar
       - name: Verify and package release assets
         run: python scripts/prepare_release.py
       - name: Archive verified release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: printer-mc1.21.11-${{ runner.os }}
+          name: printer-mc1.21.4-${{ runner.os }}
           path: dist/*/*
           if-no-files-found: error
           retention-days: 30
