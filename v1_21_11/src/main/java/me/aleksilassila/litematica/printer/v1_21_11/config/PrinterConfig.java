@@ -9,6 +9,7 @@ import fi.dy.masa.malilib.config.options.*;
 import fi.dy.masa.malilib.event.InputEventHandler;
 import fi.dy.masa.malilib.hotkeys.KeybindSettings;
 import me.aleksilassila.litematica.printer.v1_21_11.InventoryManager;
+import me.aleksilassila.litematica.printer.v1_21_11.PlacementRateLimiter;
 import me.aleksilassila.litematica.printer.v1_21_11.Printer;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -31,9 +32,13 @@ public class PrinterConfig {
         return INSTANCE;
     }
 
-    public static final ConfigInteger TICK_DELAY = new ConfigInteger("printerTickDelay", 0, 0, 100, "Ticks between scans. 0 scans every tick; all placements share a 9-interaction / 310ms rolling limit.");
-    public static final ConfigInteger NATIVE_BURST = new ConfigInteger("printerInteractionBurst", 2, 1, 4,
-            "Maximum printer interactions per tick, within the 9 / 310ms rolling budget. Start with 2; use 1 on stricter servers.");
+    public static final ConfigInteger TICK_DELAY = new ConfigInteger("printerTickDelay", 0, 0, 100, "Ticks between scans. 0 scans every tick; interactions also obey the configured rolling window and per-tick burst.");
+    public static final ConfigInteger NATIVE_BURST = new ConfigInteger("printerInteractionBurst", 9, 1, 64,
+            "Maximum printer interactions per tick, within the remaining rolling-window budget. Default: 9. Lower this on servers that reject bursts.");
+    public static final ConfigInteger INTERACTION_WINDOW_MS = new ConfigInteger("printerInteractionWindowMs", 310, 1, PlacementRateLimiter.MAX_WINDOW_MILLIS,
+            "Rolling interaction window in milliseconds. Default: 310, with a small margin over Paper's usual 300ms. Changing this preserves recent interaction history.");
+    public static final ConfigInteger INTERACTION_WINDOW_LIMIT = new ConfigInteger("printerInteractionWindowLimit", 9, 1, 64,
+            "Maximum printer block/item interaction attempts in the rolling window. Default: 9. Manual clicks and other mods are not included; increasing this may exceed the server's limit.");
     public static final ConfigInteger BLOCK_TIMEOUT = new ConfigInteger("printerBlockTimeout", 10, 0, 100, "How many ticks to wait before trying to place the same block again.");
     public static final ConfigBoolean ROTATE_PLAYER = new ConfigBoolean("printerRotatePlayer", false, "Rotate the player to face the block to place.");
     public static final ConfigBoolean PRINTER_GRIM_ROTATION = new ConfigBoolean("printerGrimRotate", true, "Allows you to place blocks anywhere while walking or using baritone.");
@@ -60,7 +65,7 @@ public class PrinterConfig {
     public static final ConfigBoolean PRINTER_AIRPLACE_ONLY = new ConfigBoolean("printerAirPlaceOnly", false, "Attempt to air place only when air place is enabled.");
     public static final ConfigBoolean PRINTER_AIRPLACE_OFFHAND_SLOT_SUPPRESS = new ConfigBoolean("printerAirPlaceOffhandSlotSuppress", false, "Legacy compatibility key. Native 1.21.11 never suppresses authoritative off-hand updates.");
     public static final ConfigBoolean PRINTER_SUPER_CHINESE_GHOST_ITEM_FIX = new ConfigBoolean("printerSuperChineseGhostItemFix", false, "Legacy compatibility key. Native 1.21.11 always accepts authoritative inventory corrections.");
-    public static final ConfigDouble PRINTER_AIRPLACE_RANGE = new ConfigDouble("printerAirPlaceRange", 4.5, 0, 10, "Range at which the printer can air place at");
+    public static final ConfigDouble PRINTER_AIRPLACE_RANGE = new ConfigDouble("printerAirPlaceRange", 4.5, 0, 10, "Range for specialized airplace handlers. Default: 4.5 blocks; actual placement also obeys the player's interaction reach.");
     public static final ConfigBoolean PRINTER_AIRPLACE_FLOATING_ONLY = new ConfigBoolean("printerAirPlaceFloatingOnly", false, "Only attempt to air place if the block position is surrounded by air.");
     public static final ConfigInteger PRINTER_MIN_INACTIVE_TIME_AIR_PLACE = new ConfigInteger("printerMinInactiveTimeAirPlace", 0, "Minimum time in ticks to wait before placing a block in the air.");
     public static final ConfigString PRINTER_HOTBAR_SLOTS = new ConfigString("printerHotbarSlots", "3,4,5,6,7,8,9", "Hotbar slots to use for the printer. Numbers from 1-9 separated by commas.");
@@ -80,6 +85,8 @@ public class PrinterConfig {
         List<IConfigBase> list = new java.util.ArrayList<>(Configs.Generic.OPTIONS);
         list.add(TICK_DELAY);
         list.add(NATIVE_BURST);
+        list.add(INTERACTION_WINDOW_MS);
+        list.add(INTERACTION_WINDOW_LIMIT);
         list.add(BLOCK_TIMEOUT);
         list.add(ROTATE_PLAYER);
         list.add(PRINTER_GRIM_ROTATION);

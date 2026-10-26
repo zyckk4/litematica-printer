@@ -24,7 +24,7 @@ public class LitematicaMixinMod implements ModInitializer {
     public static FreeLook freeLook = FreeLook.getInstance();
     // Config settings
     public static final ConfigInteger PRINTING_INTERVAL = new ConfigInteger("printingInterval", 12, 1, 40, "Printing interval. Lower values mean faster printing speed.\nIf the printer creates \"ghost blocks\" or blocks are facing the wrong way, raise this value.");
-    public static final ConfigDouble PRINTING_RANGE = new ConfigDouble("printingRange", 4.5, 2.5, 5, "Printing range, capped by the player's native interaction range. Try 4.3 on high latency servers.");
+    public static final ConfigDouble PRINTING_RANGE = new ConfigDouble("printingRange", 4.5, 2.5, 5, "Printing range. Default: 4.5 blocks, capped by the player's native interaction range.");
     //    public static final ConfigBoolean PRINT_WATER    = new ConfigBoolean("printWater",    false, "Whether the printer should place water\n source blocks or make blocks waterlogged.");
 //    public static final ConfigBoolean PRINT_IN_AIR = new ConfigBoolean("printInAir", true, "Whether or not the printer should place blocks without anything to build on.\nBe aware that some anti-cheat plugins might notice this.");
     public static final ConfigBoolean PRINT_MODE = new ConfigBoolean("printingMode", false, "Autobuild / print loaded selection.\nBe aware that some servers and anticheat plugins do not allow printing.");

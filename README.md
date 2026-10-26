@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.2**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.3**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -18,7 +18,8 @@ the earlier implementation is maintained separately on `1.21.4`.
   block updates.
 - Adjust supported block states, including repeater delay, comparator mode,
   note-block pitch and interactable open/powered states.
-- Share a 9-interaction/310 ms rolling budget, with a configurable per-tick burst.
+- Share a configurable rolling budget for block and item interactions, defaulting
+  to 9 interactions per 310 ms and up to 9 interactions per tick.
 
 ## Installation and use
 
@@ -30,7 +31,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.2-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.3-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -40,31 +41,41 @@ options are in **Generic**, and key bindings are in **Hotkeys**.
 
 ## Recommended settings
 
-Existing configuration files retain their saved values. Start with these settings
-and increase the range only after checking placement results:
+Existing configuration files retain their saved values. The two range defaults
+are 4.5 blocks; set saved ranges to 4.5 manually if they were previously lowered.
+The interaction defaults below apply to new configurations or reset options:
 
 | Setting | Suggested value | Purpose |
 | --- | --- | --- |
-| `printingRange` | `4.3` | Keep a margin within normal interaction reach |
+| `printingRange` | `4.5` | Printing range, capped by native interaction reach |
 | `printerNativeMoving` | `true` | Enable native placement while moving |
 | `printerNativeOmni` | `true` | Enable placement around the player |
 | `printerGrimRotate` | `true` | Send the orientation required by directional blocks |
-| `printerInteractionBurst` | `2` | Maximum interactions per tick; reduce to `1` if rejected |
+| `printerInteractionBurst` | `9` | Maximum interactions per tick (1–64), within the rolling budget |
+| `printerInteractionWindowMs` | `310` | Rolling window in milliseconds (1–10000); 300 is also configurable |
+| `printerInteractionWindowLimit` | `9` | Maximum interaction attempts in the window (1–64) |
 | `printerTickDelay` | `0` | Attempt each tick within the shared interaction budget |
 | `printerStopOnMovement` | `false` | Allow printing while moving |
 | `printerRaycast` | `false` | Allow in-range targets behind obstructions |
 | `printerStrictBlockFaceCheck` | `false` | Allow clicks on the far side of a support block |
 | `printerIgnoreRotation` | `false` | Preserve schematic block orientations |
 | `printerAirPlace` | `true` | Enable airplace for specialized placement handlers |
-| `printerAirPlaceRange` | `4.3` | Range for specialized airplace handlers |
+| `printerAirPlaceRange` | `4.5` | Range for specialized airplace handlers |
 | `printerInventoryDelay` | `5` | Wait after replenishment; try `10` at high latency |
 | `printerHotbarSlots` | `3,4,5,6,7,8,9` | Reserve the first two hotbar slots |
 | `printerDisableInGuis` | `true` | Pause while a screen is open |
 
 Keep `printerRotatePlayer`, `printerFreeLook` and `printerNativeGrimAirplace`
-disabled for this setup. Native placement preserves the local camera. Range can
-be increased to `4.5` where reliable; actual reach remains capped by the player's
-interaction range. Increasing the burst does not raise the rolling budget.
+disabled for this setup. Native placement preserves the local camera. Actual
+reach remains capped by the player's interaction range. Increasing the burst
+does not raise the rolling budget or guarantee that every tick can fill a batch.
+
+The shared budget includes waterlogging/item use and failed interaction attempts;
+manual clicks and other mods are not counted. Paper normally shares a 9-interaction
+budget across block and item use over 300 ms; the 310 ms default leaves a small
+timing margin. Server configuration and network jitter can still affect acceptance.
+Changing the window or limit preserves recent history instead of resetting the
+budget. Lower the burst or increase the window if interactions are rejected.
 
 ## Placement limits
 

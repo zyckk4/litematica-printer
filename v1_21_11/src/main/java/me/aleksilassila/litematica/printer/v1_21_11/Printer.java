@@ -463,13 +463,15 @@ public class Printer {
     public static boolean tryAcquirePlacementPacket() {
         MinecraftClient client = MinecraftClient.getInstance();
         return client.player != null && placementRate.tryAcquire(System.nanoTime(),
-                client.player.age, PrinterConfig.NATIVE_BURST.getIntegerValue());
+                client.player.age, PrinterConfig.NATIVE_BURST.getIntegerValue(),
+                PrinterConfig.INTERACTION_WINDOW_MS.getIntegerValue(), PrinterConfig.INTERACTION_WINDOW_LIMIT.getIntegerValue());
     }
 
     public static boolean canAcquirePlacementPacket() {
         MinecraftClient client = MinecraftClient.getInstance();
         return client.player != null && placementRate.available(System.nanoTime(),
-                client.player.age, PrinterConfig.NATIVE_BURST.getIntegerValue());
+                client.player.age, PrinterConfig.NATIVE_BURST.getIntegerValue(),
+                PrinterConfig.INTERACTION_WINDOW_MS.getIntegerValue(), PrinterConfig.INTERACTION_WINDOW_LIMIT.getIntegerValue());
     }
 
     /** Runs only after this tick's vanilla movement/rotation packet. */
