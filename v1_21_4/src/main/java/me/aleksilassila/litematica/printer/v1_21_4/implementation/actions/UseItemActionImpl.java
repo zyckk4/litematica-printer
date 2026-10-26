@@ -2,6 +2,7 @@ package me.aleksilassila.litematica.printer.v1_21_4.implementation.actions;
 
 
 import me.aleksilassila.litematica.printer.v1_21_4.actions.InteractAction;
+import me.aleksilassila.litematica.printer.v1_21_4.Printer;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.implementation.PrinterPlacementContext;
 import net.minecraft.client.MinecraftClient;
@@ -21,6 +22,7 @@ public class UseItemActionImpl extends InteractAction {
     private final MinecraftClient mc = MinecraftClient.getInstance();
     @Override
     protected ActionResult interact(MinecraftClient client, ClientPlayerEntity player, Hand hand, BlockHitResult hitResult) {
+        if (!Printer.tryAcquirePlacementPacket()) return ActionResult.FAIL;
         ActionResult result = client.interactionManager.interactItem(player, hand);
         if (!result.isAccepted()) {
             if (PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) System.out.println("Failed to interact with block got " + result);

@@ -4,9 +4,13 @@ import me.aleksilassila.litematica.printer.v1_21_4.actions.Action;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.Guide;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.interaction.CycleStateGuide;
+import me.aleksilassila.litematica.printer.v1_21_4.implementation.PrinterPlacementContext;
+import me.aleksilassila.litematica.printer.v1_21_4.implementation.actions.InteractActionImpl;
+import me.aleksilassila.litematica.printer.v1_21_4.implementation.actions.UseItemActionImpl;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.ComparatorMode;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.input.Input;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
@@ -19,6 +23,9 @@ import net.minecraft.network.packet.Packet;
 import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import sun.misc.Unsafe;
@@ -27,7 +34,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.List;
 
-/** Real guide/selection logic with a headless inventory and captured click sink. */
+/** Real guide, inventory and interaction actions with headless captured sinks. */
 public final class InteractionRegressionChecks {
     private static int assertions;
 
@@ -38,6 +45,7 @@ public final class InteractionRegressionChecks {
         String slots = PrinterConfig.PRINTER_HOTBAR_SLOTS.getStringValue();
         try {
             checkEmptyHandSelection();
+            checkUseItemSharesInteractionBudget();
         } finally {
             set(MinecraftClient.class, null, "instance", previous);
             PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString(slots);
@@ -172,6 +180,89 @@ public final class InteractionRegressionChecks {
         for (int i = 0; i < 36; i++) player.inventory.main.set(i, stack.copy());
     }
 
+    private static void checkUseItemSharesInteractionBudget() throws Exception {
+        Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+        unsafeField.setAccessible(true);
+        Unsafe unsafe = (Unsafe) unsafeField.get(null);
+        MinecraftClient client = (MinecraftClient) unsafe.allocateInstance(MinecraftClient.class);
+        FixturePlayer player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
+        FixtureInteraction interaction = (FixtureInteraction) unsafe.allocateInstance(FixtureInteraction.class);
+        player.input = new Input();
+        set(ClientPlayerEntity.class, player, "networkHandler", unsafe.allocateInstance(FixtureNetwork.class));
+        client.player = player;
+        client.interactionManager = interaction;
+        set(MinecraftClient.class, null, "instance", client);
+
+        Field rateField = Printer.class.getDeclaredField("placementRate");
+        rateField.setAccessible(true);
+        PlacementRateLimiter limiter = (PlacementRateLimiter) rateField.get(null);
+        int previousBurst = PrinterConfig.NATIVE_BURST.getIntegerValue();
+        int previousWindow = PrinterConfig.INTERACTION_WINDOW_MS.getIntegerValue();
+        int previousLimit = PrinterConfig.INTERACTION_WINDOW_LIMIT.getIntegerValue();
+        List<Printer.BlockTimeout> previousTimeouts = List.copyOf(Printer.blockPosTimeout);
+        try {
+            limiter.reset();
+            PrinterConfig.NATIVE_BURST.setIntegerValue(9);
+            // Use the maximum window so normal headless execution does not rely
+            // on finishing these real production action calls within 310 ms.
+            PrinterConfig.INTERACTION_WINDOW_MS.setIntegerValue(10_000);
+            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(2);
+            PrinterPlacementContext context = (PrinterPlacementContext) unsafe.allocateInstance(PrinterPlacementContext.class);
+            Action item = new ProbeUseItemAction(context);
+            Action block = new ProbeBlockAction(context);
+
+            check(item.send(client, player), "Production item-use action was not accepted");
+            check(block.send(client, player), "Block interaction did not share remaining item-use budget");
+            check(interaction.itemUses == 1 && interaction.blockUses == 1, "Interactions did not reach the captured manager");
+            check(!item.send(client, player), "Item use bypassed exhausted shared budget");
+            check(!block.send(client, player), "Block interaction bypassed exhausted shared budget");
+            check(interaction.itemUses == 1 && interaction.blockUses == 1 && player.swings == 2,
+                    "Rejected budget still invoked interaction or swing");
+            player.age++;
+            check(!item.send(client, player), "Item use obtained a fresh rolling budget on tick change");
+            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(3);
+            check(item.send(client, player), "Raising the configured budget did not allow the remaining item use");
+            check(!block.send(client, player), "Live limit change reset production usage");
+            check(interaction.itemUses == 2 && interaction.blockUses == 1, "Wrong number of production interactions");
+
+            limiter.reset();
+            PrinterConfig.NATIVE_BURST.setIntegerValue(1);
+            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(9);
+            check(item.send(client, player), "First item use under one-per-tick burst denied");
+            check(!block.send(client, player), "Block interaction ignored item-use burst consumption");
+            player.age++;
+            check(block.send(client, player), "Next tick did not refresh the shared interaction burst");
+
+            limiter.reset();
+            PrinterConfig.NATIVE_BURST.setIntegerValue(9);
+            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(1);
+            interaction.rejectItemUse = true;
+            int priorUses = interaction.itemUses;
+            check(!item.send(client, player), "Rejected item-use result was reported as successful");
+            check(interaction.itemUses == priorUses + 1, "Rejected attempt never reached interaction manager");
+            check(!block.send(client, player), "An attempted item use refunded its network budget after rejection");
+        } finally {
+            PrinterConfig.NATIVE_BURST.setIntegerValue(previousBurst);
+            PrinterConfig.INTERACTION_WINDOW_MS.setIntegerValue(previousWindow);
+            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(previousLimit);
+            limiter.reset();
+            Printer.blockPosTimeout.clear();
+            Printer.blockPosTimeout.addAll(previousTimeouts);
+        }
+    }
+
+    // Keep production send/interact behavior; only avoid constructing a world
+    // for the successful action's timeout location.
+    private static final class ProbeUseItemAction extends UseItemActionImpl {
+        private ProbeUseItemAction(PrinterPlacementContext context) { super(context); }
+        @Override protected BlockPos getTimeoutPos() { return BlockPos.ORIGIN; }
+    }
+
+    private static final class ProbeBlockAction extends InteractActionImpl {
+        private ProbeBlockAction(PrinterPlacementContext context) { super(context); }
+        @Override protected BlockPos getTimeoutPos() { return BlockPos.ORIGIN; }
+    }
+
     private static final class ProbeGuide extends Guide {
         private final List<ItemStack> required;
         private ProbeGuide(SchematicBlockState state, List<ItemStack> required) { super(state); this.required = required; }
@@ -185,11 +276,13 @@ public final class InteractionRegressionChecks {
         private PlayerAbilities abilities;
         private ItemStack offhand;
         private boolean sneaking;
+        private int swings;
         private FixturePlayer() { super(null, null, null, null, null, false, false); }
         @Override public PlayerInventory getInventory() { return inventory; }
         @Override public PlayerAbilities getAbilities() { return abilities; }
         @Override public ItemStack getOffHandStack() { return offhand; }
         @Override public boolean isSneaking() { return sneaking; }
+        @Override public void swingHand(Hand hand) { swings++; }
     }
 
     private static final class FixtureNetwork extends ClientPlayNetworkHandler {
@@ -200,6 +293,9 @@ public final class InteractionRegressionChecks {
     private static final class FixtureInteraction extends ClientPlayerInteractionManager {
         private int swaps;
         private int creativeWrites;
+        private int itemUses;
+        private int blockUses;
+        private boolean rejectItemUse;
         private SlotActionType lastType;
         private FixtureInteraction() { super(null, null); }
         @Override public void clickSlot(int syncId, int slotId, int button, SlotActionType type, PlayerEntity player) {
@@ -211,6 +307,14 @@ public final class InteractionRegressionChecks {
             player.getInventory().main.set(slotId, displaced);
         }
         @Override public void clickCreativeStack(ItemStack stack, int slotId) { creativeWrites++; }
+        @Override public ActionResult interactItem(PlayerEntity player, Hand hand) {
+            itemUses++;
+            return rejectItemUse ? ActionResult.FAIL : ActionResult.SUCCESS;
+        }
+        @Override public ActionResult interactBlock(ClientPlayerEntity player, Hand hand, BlockHitResult hit) {
+            blockUses++;
+            return ActionResult.SUCCESS;
+        }
     }
 
     private static void set(Class<?> owner, Object target, String name, Object value) throws Exception {
