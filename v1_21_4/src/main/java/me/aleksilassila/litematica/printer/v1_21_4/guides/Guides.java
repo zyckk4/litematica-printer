@@ -40,7 +40,6 @@ public class Guides {
 
         // Catch most blocks
         registerGuide(PropertySpecificGuesserGuide.class);
-//        registerGuide(LogGuide.class);
 
         // Anything that replaces or changes stuff after placement
         registerGuide(CycleStateGuide.class,

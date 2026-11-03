@@ -5,7 +5,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 connecting directly to 2b2t, with native placement and movement handling. No
 client-side Via mod is required.
 
-Version: **3.4.4**. The `1.21.4` branch ports the native printer logic from the
+Version: **3.4.5**. The `1.21.4` branch ports the native printer logic from the
 `1.21.11` branch, preserving its placement, movement and interaction behavior for
 blocks supported by Minecraft 1.21.4. The earlier 1.21.4 implementation remains
 available in Git history; the `1.21.11` branch targets the newer client separately.
@@ -34,7 +34,7 @@ Requirements:
 - [MaLiLib 0.23.5](https://modrinth.com/mod/malilib/version/ifi4uRpL).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.4-mc1.21.4.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.5-mc1.21.4.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -70,11 +70,13 @@ The interaction defaults below apply to new configurations or reset options:
 | `printerAirPlace` | `true` | Enable airplace for specialized placement handlers |
 | `printerAirPlaceRange` | `4.5` | Range for specialized airplace handlers |
 | `printerInventoryDelay` | `5` | Wait after replenishment; try `10` at high latency |
-| `printerHotbarSlots` | `3,4,5,6,7,8,9` | Reserve the first two hotbar slots |
+| `printerHotbarSlots` | `3,4,5,6,7,8,9` | Use slots 3–9 as refill destinations |
 | `printerDisableInGuis` | `true` | Pause while a screen is open |
 
 Keep `printerRotatePlayer`, `printerFreeLook` and `printerNativeGrimAirplace`
-disabled for this setup. Native placement preserves the local camera. Actual
+disabled for this setup. Either native mode leaves the local camera in control.
+The legacy FreeLook camera and its inventory movement controls require both
+`printerNativeMoving` and `printerNativeOmni` to be off. Actual
 reach remains capped by the player's interaction range. Increasing the burst
 does not raise the rolling budget or guarantee that every tick can fill a batch.
 
@@ -87,10 +89,19 @@ budget. Lower the burst or increase the window if interactions are rejected.
 
 ## Placement limits
 
-State interactions require standing still, not sneaking, and at least one empty
-inventory slot. Adjacent independent single chests require actual sneaking to
-prevent automatic merging. Stand still to finish precise sign rotations and
-specialized placement such as rails or gravity blocks.
+With `printerNativeMoving` enabled, ordinary placements take priority. While moving,
+the printer can also lay supported rails, adjust repeaters, comparators and note
+blocks, and waterlog eligible targets. Leave an empty inventory slot for tuning
+and release sneak for tuning and bucket use. Rail connections depend on the
+support and neighboring tracks already in the world. Stand still for other
+specialized guides and precise sign rotations. Adjacent independent single
+chests require actual sneaking to prevent automatic merging.
+
+Disable `replaceFluidSourceBlocks` to protect water and lava sources at the
+placement position. Flowing water and lava remain eligible for replacement.
+With `stripLogs` enabled, the printer prefers the finished material. When only
+the corresponding plain log and an axe are available, it places the log on the
+schematic axis and strips it once placed.
 
 Incorrect blocks and orientations are not automatically excavated and replaced.
 Redstone-controlled states follow the surrounding circuit. Sign text is filled
@@ -100,20 +111,15 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Open issues from the printer audit
-
-These findings remain open after the waterlogging change.
+## Remaining issues in 3.4.5
 
 | Area | Trigger and observed code behavior |
 | --- | --- |
 | Native solver | With `printerNativeMoving` enabled and both `printerNativeOmni` and `printerGrimRotate` disabled, ordinary blocks can be skipped even with solid support. |
-| Fluid replacement | Disabling `replaceFluidSourceBlocks` also blocks flowing fluids on the native path. Legacy supported placement can still replace a source. |
-| Stripped logs | `stripLogs` can strip a matching log already in the world, but the guide that first places a plain log is unregistered. |
-| Keys and camera | `printerPreventDoubleTapSprinting` also affects play with printing off. Default `printerPickBlock` can consume middle click on a miss. Native mode disables legacy FreeLook and its inventory movement controls. In legacy mode FreeLook can stay active after printing stops. |
+| Keys and camera | Default `printerPickBlock` can consume middle click on a miss. In legacy mode FreeLook can stay active after printing stops. |
 | Airplace and state matching | The legacy airplace switch, range, airplace-only mode and inactivity delay do not govern native omni placement. Legacy airplace can reuse a cached context with `printerNoPlacementCache` enabled. The explicit `printerAllowNoneExactStates` check is limited to the legacy glow lichen guide. |
 | Inventory | `printerHotbarSlots` limits refill destinations. Existing materials in excluded slots can still be selected. A survival refill takes at least one tick even with zero inventory delay. Native material matching can skip a usable renamed block. |
-| Redstone and signs | Clicking a repeater as a placement support can cycle its delay. Manually editing a sign at a schematic sign position while printing can submit schematic text and close the editor. |
-| Stacked blocks | The guide for adding snow layers, candles or sea pickles rejects an existing block of the same type, leaving the count short. |
+| Signs | Manually editing a sign at a schematic sign position while printing can submit schematic text and close the editor. |
 | Settings screen | Building the combined configuration list adds Litematica's Generic options twice. |
 
 ## Build and verification

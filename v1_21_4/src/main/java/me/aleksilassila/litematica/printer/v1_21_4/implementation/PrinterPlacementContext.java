@@ -1,11 +1,11 @@
 package me.aleksilassila.litematica.printer.v1_21_4.implementation;
 
-import me.aleksilassila.litematica.printer.v1_21_4.LitematicaMixinMod;
+import me.aleksilassila.litematica.printer.v1_21_4.BlockHelper;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.FireBlock;
-import net.minecraft.block.FluidBlock;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.Hand;
@@ -56,27 +56,25 @@ public class PrinterPlacementContext extends ItemPlacementContext {
 
     @Override
     public boolean canPlace() {
-        if (!isAirPlace) {
-            return super.canPlace();
-        }
-        if (!super.canPlace()) {
+        if (!super.canPlace() || !BlockHelper.canReplaceFluid(getWorld().getBlockState(getBlockPos()))) {
             return false;
         }
+        if (!isAirPlace) return true;
         BlockState currentState = this.getWorld().getBlockState(hitResult.getBlockPos());
         if (this.getPlayer().getEyePos().distanceTo(hitResult.getBlockPos().toCenterPos()) > PrinterConfig.PRINTER_AIRPLACE_RANGE.getDoubleValue()) {
             return false;
         }
-        // Wrong state and not replaceable
-        if (!currentState.isReplaceable() && !(currentState.getBlock() instanceof FireBlock)) {
-            return false;
-        } else {
-            // Replaceable block. Check fluid source block replacement config
-            if (currentState.getBlock() instanceof FluidBlock && !LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.getBooleanValue()) {
-                // Only allow replacing fluid source blocks if the config is enabled
-                return false;
-            }
-        }
-        return true;
+        return currentState.isReplaceable() || currentState.getBlock() instanceof FireBlock;
+    }
+
+    /** Rebuild the wire context: supports can change and some BlockItems redirect the destination. */
+    public boolean canSendPlacement(PlayerEntity player, Hand hand, BlockHitResult wire) {
+        ItemStack stack = player.getStackInHand(hand);
+        if (!(stack.getItem() instanceof BlockItem item)
+                || !ItemStack.areItemsAndComponentsEqual(stack, getStack())) return false;
+        ItemPlacementContext live = item.getPlacementContext(new ItemPlacementContext(player, hand, stack, wire));
+        return live != null && live.getBlockPos().equals(getBlockPos())
+                && BlockHelper.canReplaceFluid(live.getWorld().getBlockState(live.getBlockPos()));
     }
 
     @Override

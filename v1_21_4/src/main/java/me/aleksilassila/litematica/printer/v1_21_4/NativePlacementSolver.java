@@ -13,6 +13,7 @@ import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
 import net.minecraft.state.property.Property;
+import net.minecraft.state.property.IntProperty;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -65,6 +66,11 @@ public final class NativePlacementSolver {
     /** The state achievable by the next single use; later uses follow server updates. */
     public static BlockState placementTarget(BlockView current, BlockView schematic, BlockPos target, BlockState desired) {
         BlockState existing = current.getBlockState(target);
+        IntProperty count = stackCount(desired);
+        if (count != null) {
+            int placed = existing.isOf(desired.getBlock()) ? existing.get(count) : 0;
+            return desired.with(count, Math.min(placed + 1, desired.get(count)));
+        }
         if (desired.getBlock() instanceof SlabBlock && desired.get(SlabBlock.TYPE) == SlabType.DOUBLE
                 && existing.isReplaceable()) {
             return desired.with(SlabBlock.TYPE, SlabType.BOTTOM);
@@ -93,11 +99,24 @@ public final class NativePlacementSolver {
                 && desired.get(SlabBlock.TYPE) == SlabType.DOUBLE && current.get(SlabBlock.TYPE) != SlabType.DOUBLE;
     }
 
+    private static IntProperty stackCount(BlockState state) {
+        if (state.getBlock() instanceof SnowBlock) return SnowBlock.LAYERS;
+        if (state.getBlock() instanceof CandleBlock) return CandleBlock.CANDLES;
+        if (state.getBlock() instanceof SeaPickleBlock) return SeaPickleBlock.PICKLES;
+        return null;
+    }
+
+    public static boolean canAddToStack(BlockState current, BlockState desired) {
+        if (!current.isOf(desired.getBlock())) return false;
+        IntProperty count = stackCount(desired);
+        return count != null && current.get(count) < desired.get(count);
+    }
+
     /** Ordinary blocks use no rotation; directional blocks use a movement-safe lattice. */
     public static Solution solveMoving(BlockPos target, BlockState desired, ItemStack stack,
                                        double reach, boolean allowAir, boolean sprinting) {
         if (!canSolve(target, stack)) return null;
-        List<HitCandidate> hits = candidates(target, reach, allowAir, true);
+        List<HitCandidate> hits = candidates(target, desired, reach, allowAir, true);
         Solution independent = hasKnownLookDirection(desired) ? null : solveAnyRotation(target, desired, stack, hits);
         if (independent != null) return independent;
 
@@ -126,7 +145,7 @@ public final class NativePlacementSolver {
                                                  double reach, boolean allowAir, boolean sprinting,
                                                  float yaw, float pitch) {
         if (!canSolve(target, stack)) return null;
-        return solveRotations(target, desired, stack, candidates(target, reach, allowAir, true),
+        return solveRotations(target, desired, stack, candidates(target, desired, reach, allowAir, true),
                 List.of(new Rotation(yaw, pitch, 0)));
     }
 
@@ -134,7 +153,7 @@ public final class NativePlacementSolver {
     public static Solution solveStationary(BlockPos target, BlockState desired, ItemStack stack,
                                            double reach, boolean allowAir) {
         if (!canSolve(target, stack)) return null;
-        List<HitCandidate> hits = candidates(target, reach, allowAir, true);
+        List<HitCandidate> hits = candidates(target, desired, reach, allowAir, true);
         Solution independent = hasKnownLookDirection(desired) ? null : solveAnyRotation(target, desired, stack, hits);
         if (independent != null) return independent;
 
@@ -195,7 +214,7 @@ public final class NativePlacementSolver {
     /** Returns only rotation-independent airplace solutions; never a directional fallback. */
     public static Solution solveAnyRotation(BlockPos target, BlockState desired, ItemStack stack, double reach) {
         if (!canSolve(target, stack)) return null;
-        return solveAnyRotation(target, desired, stack, candidates(target, reach, true, false));
+        return solveAnyRotation(target, desired, stack, candidates(target, desired, reach, true, false));
     }
 
     private static Solution solveAnyRotation(BlockPos target, BlockState desired, ItemStack stack,
@@ -256,7 +275,7 @@ public final class NativePlacementSolver {
         // Rebuild the hit at the new eyes, preserving the already-sent angles.
         // Reusing the old point alone needlessly dropped a whole moving batch.
         Solution refreshed = solveRotations(target, desired, stack,
-                candidates(target, reach, solution.airPlace(), true), List.of(new Rotation(yaw, pitch, solution.yawStep())));
+                candidates(target, desired, reach, solution.airPlace(), true), List.of(new Rotation(yaw, pitch, solution.yawStep())));
         return refreshed == null ? null : new Solution(refreshed.hit(), refreshed.predicted(), yaw, pitch,
                 solution.yawStep(), refreshed.airPlace(), solution.anyRotation());
     }
@@ -268,14 +287,16 @@ public final class NativePlacementSolver {
     private static boolean canSolve(BlockPos target, ItemStack stack) {
         MinecraftClient mc = MinecraftClient.getInstance();
         return mc.player != null && mc.world != null && !stack.isEmpty() && stack.getItem() instanceof BlockItem
-                && mc.world.isInBuildLimit(target) && mc.world.getWorldBorder().contains(target);
+                && mc.world.isInBuildLimit(target) && mc.world.getWorldBorder().contains(target)
+                && BlockHelper.canReplaceFluid(mc.world.getBlockState(target));
     }
 
     private static double effectiveReach(double reach) {
         return Math.max(0.0, Math.min(reach, MinecraftClient.getInstance().player.getBlockInteractionRange()));
     }
 
-    private static List<HitCandidate> candidates(BlockPos target, double configuredReach, boolean allowAir, boolean allowSupports) {
+    private static List<HitCandidate> candidates(BlockPos target, BlockState desired, double configuredReach,
+                                                  boolean allowAir, boolean allowSupports) {
         MinecraftClient mc = MinecraftClient.getInstance();
         Vec3d eye = mc.player.getEyePos();
         double reach = effectiveReach(configuredReach);
@@ -283,9 +304,21 @@ public final class NativePlacementSolver {
         // Target-position interaction is the native airplace path. A local
         // inside=true flag is unnecessary and would differ from the wire hit.
         BlockState targetState = mc.world.getBlockState(target);
+        if (canAddToStack(targetState, desired)) {
+            // Click the actual outline of the stack. Snow in particular requires its upper face.
+            for (var box : targetState.getOutlineShape(mc.world, target).getBoundingBoxes()) {
+                Vec3d center = box.offset(target).getCenter();
+                for (Direction face : Direction.values()) {
+                    Vec3d sample = center.add(face.getOffsetX() * box.getLengthX() / 2,
+                            face.getOffsetY() * box.getLengthY() / 2, face.getOffsetZ() * box.getLengthZ() / 2);
+                    addHit(result, eye, target, face, sample, false, reach);
+                }
+            }
+            return result;
+        }
         if (allowAir && targetState.isReplaceable()) {
             for (Direction face : Direction.values()) addFace(result, eye, target, face, true, reach);
-        } else if (allowSupports && targetState.getBlock() instanceof SlabBlock
+        } else if ((allowSupports || canCompleteSlab(targetState, desired)) && targetState.getBlock() instanceof SlabBlock
                 && targetState.get(SlabBlock.TYPE) != SlabType.DOUBLE) {
             // Slab.canReplace depends on the held slab, side and hit height.
             // Let the real context validate each same-position merge.
@@ -335,7 +368,7 @@ public final class NativePlacementSolver {
         // configured face restriction; raycast is an independent opt-in gate.
         if (!MinecraftClient.getInstance().world.getBlockState(hit.getBlockPos()).isReplaceable()
                 && PrinterConfig.STRICT_BLOCK_FACE_CHECK.getBooleanValue()
-                && !faceVisible(eye, hit.getBlockPos(), hit.getSide())) return false;
+                && eye.subtract(hit.getPos()).dotProduct(Vec3d.of(hit.getSide().getVector())) <= 0) return false;
         if (!PrinterConfig.RAYCAST.getBooleanValue()) return true;
 
         MinecraftClient mc = MinecraftClient.getInstance();
@@ -349,18 +382,6 @@ public final class NativePlacementSolver {
                 && (!PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.getBooleanValue() || obstruction.getSide() == hit.getSide());
     }
 
-    private static boolean faceVisible(Vec3d eye, BlockPos block, Direction face) {
-        // Solid-support compatibility gate, independent of crosshair alignment.
-        return switch (face) {
-            case DOWN -> eye.y < block.getY();
-            case UP -> eye.y > block.getY() + 1.0;
-            case NORTH -> eye.z < block.getZ();
-            case SOUTH -> eye.z > block.getZ() + 1.0;
-            case WEST -> eye.x < block.getX();
-            case EAST -> eye.x > block.getX() + 1.0;
-        };
-    }
-
     private static boolean canClick(BlockState state) {
         if (state.isReplaceable()) return true;
         Block block = state.getBlock();
@@ -372,7 +393,7 @@ public final class NativePlacementSolver {
                 || block instanceof StonecutterBlock || block instanceof GrindstoneBlock || block instanceof LoomBlock
                 || block instanceof CartographyTableBlock || block instanceof NoteBlock || block instanceof ComposterBlock
                 || block instanceof CakeBlock || block instanceof FlowerPotBlock || block instanceof DragonEggBlock
-                || block instanceof RespawnAnchorBlock);
+                || block instanceof RespawnAnchorBlock || block instanceof AbstractRedstoneGateBlock);
     }
 
     private static BlockState simulate(BlockPos target, ItemStack stack, BlockHitResult hit, float yaw, float pitch) {

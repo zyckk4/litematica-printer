@@ -41,6 +41,7 @@ public class InteractActionImpl extends InteractAction {
         if (temporarySneak && client.options != null && client.options.sneakKey.isPressed()) {
             return ActionResult.FAIL;
         }
+        if (!changesClickedBlock && !context.canSendPlacement(player, hand, hitResult)) return ActionResult.FAIL;
         if (!Printer.tryAcquirePlacementPacket()) return ActionResult.FAIL;
         try {
             if (temporarySneak) {

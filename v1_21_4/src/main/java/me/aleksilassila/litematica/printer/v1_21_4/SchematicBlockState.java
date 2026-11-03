@@ -16,13 +16,21 @@ public class SchematicBlockState {
     public final BlockState currentState;
 
     public SchematicBlockState(World world, WorldSchematic schematic, BlockPos blockPos) {
+        this(world, schematic, blockPos, schematic.getBlockState(blockPos));
+    }
+
+    private SchematicBlockState(World world, WorldSchematic schematic, BlockPos blockPos, BlockState target) {
         this.world = world;
         this.schematic = schematic;
 
         this.blockPos = blockPos;
 
-        this.targetState = schematic.getBlockState(blockPos);
+        this.targetState = target;
         this.currentState = world.getBlockState(blockPos);
+    }
+
+    public SchematicBlockState withTarget(BlockState target) {
+        return target == targetState ? this : new SchematicBlockState(world, schematic, blockPos, target);
     }
 
     public SchematicBlockState offset(Direction direction) {

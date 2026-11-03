@@ -9,6 +9,7 @@ import me.aleksilassila.litematica.printer.v1_21_4.actions.Action;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.Guide;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.Guides;
+import me.aleksilassila.litematica.printer.v1_21_4.guides.interaction.LogStrippingGuide;
 import me.aleksilassila.litematica.printer.v1_21_4.implementation.PrinterPlacementContext;
 import me.aleksilassila.litematica.printer.v1_21_4.implementation.actions.AirPlaceAction;
 import me.aleksilassila.litematica.printer.v1_21_4.actions.ActionChain;
@@ -43,7 +44,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class Printer {
-    private final List<NativePlacementAction> nativeActions = new ArrayList<>();
+    private final List<Action> nativeActions = new ArrayList<>();
     private int scanCursor;
     private int guideCursor;
     private int correctionCooldown;
@@ -76,10 +77,17 @@ public class Printer {
         this.actionHandler = new ActionHandler(client, player);
     }
 
+    private static boolean printingRequested() {
+        var printKey = LitematicaMixinMod.PRINT.getKeybind();
+        // MaLiLib also treats an empty modifier binding as held.
+        return LitematicaMixinMod.PRINT_MODE.getBooleanValue()
+                || (!printKey.getKeys().isEmpty() && printKey.isKeybindHeld());
+    }
+
     public static boolean canRunActions(MinecraftClient client, ClientPlayerEntity player) {
         return client.player == player && client.world != null && player.isAlive()
                 && player.getAbilities().allowModifyWorld && !player.isUsingItem()
-                && (LitematicaMixinMod.PRINT_MODE.getBooleanValue() || LitematicaMixinMod.PRINT.getKeybind().isPressed())
+                && printingRequested()
                 && (!PrinterConfig.PRINTER_DISABLE_IN_GUIS.getBooleanValue() || client.currentScreen == null)
                 && (!PrinterConfig.STOP_ON_MOVEMENT.getBooleanValue() || player.getVelocity().length() <= 0.1);
     }
@@ -130,7 +138,7 @@ public class Printer {
             delayCounter = 0;
         }
 
-        if (!LitematicaMixinMod.PRINT_MODE.getBooleanValue() && !LitematicaMixinMod.PRINT.getKeybind().isPressed())
+        if (!printingRequested())
             return false;
 
         PlayerAbilities abilities = player.getAbilities();
@@ -170,7 +178,7 @@ public class Printer {
                 if (i > 0 && System.nanoTime() >= solveDeadline) break;
                 examined++;
                 BlockPos position = candidates.get((start + i) % candidates.size());
-                BlockState finalState = worldSchematic.getBlockState(position);
+                BlockState finalState = LogStrippingGuide.placementTarget(player, worldSchematic.getBlockState(position));
                 // Adjacent chests change one another's type. The second half
                 // must be solved after the first server update, not against
                 // the same empty client world in this batch.
@@ -223,10 +231,7 @@ public class Printer {
             scanCursor = start + examined;
             if (!nativeActions.isEmpty()) return true;
         }
-        // The older guide chain uses discrete view rotations. Do not fall back
-        // to it mid-stride after the native movement solver deliberately skipped
-        // an unsafe direction. Special interactions can resume once stationary.
-        if (nativeEnabled && moving) return false;
+        if (moving && nativeEnabled && !PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()) return false;
         List<Action> batchedActions = new ArrayList<>();
         AirplaceBatchKey batchKey = null;
         int batchedChains = 0;
@@ -241,6 +246,13 @@ public class Printer {
             SchematicBlockState state = new SchematicBlockState(player.getWorld(), worldSchematic, position);
             if (state.targetState.equals(state.currentState) || state.targetState.isAir()) continue;
             if (pendingPlacements.containsKey(position)) continue;
+            if (moving && nativeEnabled) {
+                MovingPrinterAction action = MovingPrinterAction.prepare(state, player, getEffectivePrintingRange());
+                if (action == null) continue;
+                actionHandler.clearLookAction();
+                nativeActions.add(action);
+                return true;
+            }
             // Do not defeat a skipped native placement by running the old
             // arbitrary-rotation solver on it again in the same tick.
             if (nativeEnabled && state.currentState.isReplaceable()
@@ -248,6 +260,9 @@ public class Printer {
                     && state.currentState.getBlock() != state.targetState.getBlock()
                     && !requiresLegacyGuide(state.targetState)) continue;
 
+            if (state.currentState.isReplaceable()) {
+                state = state.withTarget(LogStrippingGuide.placementTarget(player, state.targetState));
+            }
             Guide[] guides = interactionGuides.getInteractionGuides(state);
 
             for (Guide guide : guides) {
@@ -297,8 +312,9 @@ public class Printer {
     private boolean isNativePlacementCandidate(SchematicBlockState state, java.util.Set<BlockPos> playerOccupied) {
         if (state.targetState == null || state.targetState.isAir()) return false;
         if (state.currentState.equals(state.targetState)) return false;
-        boolean slabCompletion = NativePlacementSolver.canCompleteSlab(state.currentState, state.targetState);
-        if (state.currentState.getBlock() == state.targetState.getBlock() && !slabCompletion) return false;
+        boolean addingToBlock = NativePlacementSolver.canCompleteSlab(state.currentState, state.targetState)
+                || NativePlacementSolver.canAddToStack(state.currentState, state.targetState);
+        if (state.currentState.getBlock() == state.targetState.getBlock() && !addingToBlock) return false;
         if (!(state.targetState.getBlock().asItem() instanceof net.minecraft.item.BlockItem)) return false;
         if (playerOccupied.contains(state.blockPos)) return false;
         if (requiresLegacyGuide(state.targetState)) return false;
@@ -314,12 +330,11 @@ public class Printer {
             if (schematic == null || (!schematic.getBlockState(observed).isAir()
                     && mc.world.getBlockState(observed).isAir())) return false;
         }
-        if (state.currentState.getBlock() instanceof FluidBlock
-                && !LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.getBooleanValue()) return false;
+        if (!BlockHelper.canReplaceFluid(state.currentState)) return false;
         // Never replace a solid block in the native path.  The guide path is
         // retained for replacement/interaction guides that know the block's
         // update order.
-        return state.currentState.isReplaceable() || slabCompletion;
+        return state.currentState.isReplaceable() || addingToBlock;
     }
 
     /**
@@ -477,11 +492,11 @@ public class Printer {
     /** Runs only after this tick's vanilla movement/rotation packet. */
     public void flushNativePlacements() {
         if (nativeActions.isEmpty()) return;
-        List<NativePlacementAction> batch = List.copyOf(nativeActions);
+        List<Action> batch = List.copyOf(nativeActions);
         nativeActions.clear();
         if (!canRunActions(mc, player) || mc.getCameraEntity() != player
                 || mc.world != predictionWorld || player.hasVehicle()) return;
-        for (NativePlacementAction action : batch) {
+        for (Action action : batch) {
             if (!canAcquirePlacementPacket()) break;
             // One target becoming obstructed during movement must not discard
             // other independent targets that still fit this batch's rotation.
@@ -515,7 +530,12 @@ public class Printer {
 
     /** Invoked on the client thread after vanilla applies a block update. */
     public static void confirmNativePlacement(BlockPos pos, BlockState actual) {
-        PendingPlacement pending = pendingPlacements.remove(pos);
+        PendingPlacement pending = pendingPlacements.get(pos);
+        if (pending != null && pending.stack.isEmpty() && actual.isOf(pending.desired.getBlock())) {
+            var property = MovingPrinterAction.tuningProperty(pending.desired);
+            if (property != null && !actual.get(property).equals(pending.desired.get(property))) return;
+        }
+        pendingPlacements.remove(pos);
         if (pending != null && PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
             if (pending.stack.isOf(net.minecraft.item.Items.WATER_BUCKET)) {
                 boolean filled = actual.isOf(pending.desired.getBlock())

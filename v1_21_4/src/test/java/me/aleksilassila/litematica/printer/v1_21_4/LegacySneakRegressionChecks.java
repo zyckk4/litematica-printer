@@ -189,7 +189,7 @@ public final class LegacySneakRegressionChecks {
             return context;
         }
 
-        private InteractActionImpl action(boolean sneak) throws Exception { return new InteractActionImpl(context(sneak)); }
+        private InteractActionImpl action(boolean sneak) throws Exception { return new InteractActionImpl(context(sneak), true); }
 
         private void checkRestored() {
             check(player.input.playerInput == original, "Temporary action did not restore the original input record");

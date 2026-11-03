@@ -89,12 +89,15 @@ public final class NativePlacementSolverChecks {
             checkTorchAttachments(fixture);
             checkChestStages(fixture);
             checkSlabStages(fixture);
+            fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
+            assertions += StackedPlacementChecks.run(fixture.client, fixture.world.blocks, fixture.unsafe);
             checkHiddenSlabMerges(fixture);
             checkTrapdoorsAndLevers(fixture);
             checkDoorHinges(fixture);
             checkStandingSigns(fixture);
             checkRevalidationAndRejection(fixture);
             checkNativeCameraIsolation(fixture);
+            checkSprintTapProtection(fixture);
             checkAirborneAndJumpRotation(fixture);
             checkLegacyCameraAndPacketCache(fixture);
             System.out.println("Native solver checks passed: " + solutions
@@ -566,6 +569,21 @@ public final class NativePlacementSolverChecks {
         NativePlacementSolver.Solution solution = NativePlacementSolver.solveMoving(target, desired,
                 fixture.player.heldStack, 4.5, true, false);
         check(solution != null, "Initial moving fixture must be placeable");
+        boolean replaceSources = LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.getBooleanValue();
+        try {
+            LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.setBooleanValue(false);
+            for (Block fluid : List.of(Blocks.WATER, Blocks.LAVA)) {
+                fixture.world.blocks.put(target, fluid.getDefaultState());
+                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, solution, 4.5) == null,
+                        "Native packet could replace a source that appeared after solving");
+                fixture.world.blocks.put(target, fluid.getDefaultState().with(net.minecraft.block.FluidBlock.LEVEL, 1));
+                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, solution, 4.5) != null,
+                        "Native source protection rejected flowing fluid");
+            }
+        } finally {
+            LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.setBooleanValue(replaceSources);
+            fixture.world.blocks.remove(target);
+        }
         fixture.moveTo(new Vec3d(0.6, 64.0, 0.65));
         check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, solution, 4.5) != null,
                 "Small movement needlessly invalidated a reachable hit");
@@ -724,6 +742,51 @@ public final class NativePlacementSolverChecks {
             PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(omni);
             PrinterConfig.ROTATE_PLAYER.setBooleanValue(rotatePlayer);
             PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(grimRotate);
+        }
+    }
+
+    private static void checkSprintTapProtection(Fixture fixture) throws Exception {
+        Method handler = java.util.Arrays.stream(ClientPlayerEntity.class.getDeclaredMethods())
+                .filter(method -> method.getName().contains("printer$preventDoubleTapSprint")).findFirst().orElseThrow();
+        handler.setAccessible(true);
+        Field timer = ClientPlayerEntity.class.getDeclaredField("ticksLeftToDoubleTapSprint");
+        timer.setAccessible(true);
+        var printKey = LitematicaMixinMod.PRINT.getKeybind();
+        String binding = printKey.getStringValue();
+        Field pressed = printKey.getClass().getDeclaredField("pressed");
+        pressed.setAccessible(true);
+        boolean previouslyPressed = pressed.getBoolean(printKey);
+        boolean printing = LitematicaMixinMod.PRINT_MODE.getBooleanValue();
+        boolean prevent = PrinterConfig.PREVENT_DOUBLE_TAP_SPRINTING.getBooleanValue();
+        try {
+            for (boolean active : new boolean[]{false, true}) {
+                LitematicaMixinMod.PRINT_MODE.setBooleanValue(active);
+                for (boolean enabled : new boolean[]{false, true}) {
+                    PrinterConfig.PREVENT_DOUBLE_TAP_SPRINTING.setBooleanValue(enabled);
+                    timer.setInt(fixture.player, 5);
+                    handler.invoke(fixture.player, (Object) null);
+                    check(timer.getInt(fixture.player) == (active && enabled ? 0 : 5),
+                            "Double-tap sprint timer changed outside active printing or survived suppression");
+                }
+            }
+            LitematicaMixinMod.PRINT_MODE.setBooleanValue(false);
+            pressed.setBoolean(printKey, true);
+            printKey.tick();
+            check(!printKey.isPressed() && printKey.isKeybindHeld(), "Expected sustained print key input");
+            timer.setInt(fixture.player, 5);
+            handler.invoke(fixture.player, (Object) null);
+            check(timer.getInt(fixture.player) == 0, "Held print key did not enable sprint protection");
+            printKey.clearKeys();
+            pressed.setBoolean(printKey, false);
+            timer.setInt(fixture.player, 5);
+            handler.invoke(fixture.player, (Object) null);
+            check(timer.getInt(fixture.player) == 5, "Unbound print key activated printing");
+        } finally {
+            printKey.setValueFromString(binding);
+            pressed.setBoolean(printKey, previouslyPressed);
+            printKey.tick();
+            LitematicaMixinMod.PRINT_MODE.setBooleanValue(printing);
+            PrinterConfig.PREVENT_DOUBLE_TAP_SPRINTING.setBooleanValue(prevent);
         }
     }
 
