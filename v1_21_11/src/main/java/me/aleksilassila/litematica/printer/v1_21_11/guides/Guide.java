@@ -95,7 +95,10 @@ abstract public class Guide extends BlockHelperImpl {
 
         loop:
         for (Property<?> property : state1.getProperties()) {
-            if (!PrinterConfig.WATERLOGGING.getBooleanValue() && property == Properties.WATERLOGGED && !(state1.getBlock() instanceof CoralBlock)) continue;
+            // Place the dry block first; the separate bucket guide fills it after it exists in the world.
+            if (property == Properties.WATERLOGGED && !(state1.getBlock() instanceof CoralBlock)
+                    && (!PrinterConfig.WATERLOGGING.getBooleanValue()
+                    || targetState.getOrEmpty(Properties.WATERLOGGED).orElse(false))) continue;
 
             for (Property<?> ignoredProperty : propertiesToIgnore) {
                 if (property == ignoredProperty) continue loop;

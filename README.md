@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.3**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.4**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -31,13 +31,18 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.3-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.4-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
 Load and position a schematic in Litematica. Press `CAPS_LOCK` to toggle printing,
 or hold `V` to print. Open Litematica's configuration with `M + C`; printer
 options are in **Generic**, and key bindings are in **Hotkeys**.
+
+Automatic water-bucket use is disabled by default. Enable `printerWaterlogging`
+to fill a dry block of the matching type where the schematic calls for waterlogging.
+The printer checks line of sight from the player's eyes to that block, so you can
+look elsewhere. Release sneak before waterlogging.
 
 ## Recommended settings
 
@@ -91,6 +96,23 @@ are not automatically repaired.
 
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
+
+## Open issues from the 1.21.11 audit
+
+These findings remain open after the waterlogging change.
+
+| Area | Trigger and observed code behavior |
+| --- | --- |
+| Native solver | With `printerNativeMoving` enabled and both `printerNativeOmni` and `printerGrimRotate` disabled, ordinary blocks can be skipped even with solid support. |
+| Fluid replacement | Disabling `replaceFluidSourceBlocks` also blocks flowing fluids on the native path. Legacy supported placement can still replace a source. |
+| Stripped logs and tools | `stripLogs` can strip a matching log already in the world, but the guide that first places a plain log is unregistered. The axe, hoe and shovel lists omit copper tools. |
+| Schematic import | `autoConvertSchematicToLitematicOnLoad` passes a file as a directory, assumes vanilla structure format, and reports success even if conversion returns no schematic. |
+| Keys and camera | `printerPreventDoubleTapSprinting` also affects play with printing off. Default `printerPickBlock` can consume middle click on a miss. Native mode disables legacy FreeLook and its inventory movement controls. In legacy mode FreeLook can stay active after printing stops. |
+| Airplace and state matching | The legacy airplace switch, range, airplace-only mode and inactivity delay do not govern native omni placement. Legacy airplace can reuse a cached context with `printerNoPlacementCache` enabled. The explicit `printerAllowNoneExactStates` check is limited to the legacy glow lichen guide. |
+| Inventory | `printerHotbarSlots` limits refill destinations. Existing materials in excluded slots can still be selected. A survival refill takes at least one tick even with zero inventory delay. Native material matching can skip a usable renamed block. |
+| Redstone and signs | Clicking a repeater as a placement support can cycle its delay. Manually editing a sign at a schematic sign position while printing can submit schematic text and close the editor. |
+| Stacked blocks | The guide for adding snow layers, candles or sea pickles rejects an existing block of the same type, leaving the count short. |
+| Settings screen | Building the combined configuration list adds Litematica's Generic options twice. |
 
 ## Build and verification
 

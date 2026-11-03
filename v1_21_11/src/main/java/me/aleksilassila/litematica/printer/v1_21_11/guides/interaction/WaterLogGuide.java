@@ -1,138 +1,148 @@
 package me.aleksilassila.litematica.printer.v1_21_11.guides.interaction;
 
-
+import fi.dy.masa.litematica.data.DataManager;
+import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import me.aleksilassila.litematica.printer.v1_21_11.LitematicaMixinMod;
+import me.aleksilassila.litematica.printer.v1_21_11.MovementHandler;
+import me.aleksilassila.litematica.printer.v1_21_11.Printer;
 import me.aleksilassila.litematica.printer.v1_21_11.SchematicBlockState;
-import me.aleksilassila.litematica.printer.v1_21_11.actions.*;
-import me.aleksilassila.litematica.printer.v1_21_11.guides.placement.GeneralPlacementGuide;
-import me.aleksilassila.litematica.printer.v1_21_11.implementation.PrinterPlacementContext;
-import me.aleksilassila.litematica.printer.v1_21_11.implementation.actions.UseItemActionImpl;
+import me.aleksilassila.litematica.printer.v1_21_11.actions.Action;
+import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
+import me.aleksilassila.litematica.printer.v1_21_11.guides.Guide;
+import me.aleksilassila.litematica.printer.v1_21_11.mixin.MixinAccessorClientPlayerEntity;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ShapeContext;
 import net.minecraft.block.Waterloggable;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.world.ClientWorld;
+import net.minecraft.fluid.Fluids;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
+import net.minecraft.world.attribute.EnvironmentAttributes;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
-/*
- * @author IceTank
- * @since 08.03.2026
- */
-public class WaterLogGuide extends GeneralPlacementGuide {
-    boolean canWork = false;
-
+public class WaterLogGuide extends Guide {
     public WaterLogGuide(SchematicBlockState state) {
         super(state);
-        canWork = state.targetState.getBlock() instanceof Waterloggable;
-    }
-
-    @Override
-    public boolean canExecute(ClientPlayerEntity player) {
-        if (!canWork) return false;
-        if (!(currentState.getBlock() instanceof Waterloggable)) return false;
-
-        if (currentState.get(Properties.WATERLOGGED) == null
-                || currentState.get(Properties.WATERLOGGED) == targetState.get(Properties.WATERLOGGED)) {
-            return false;
-        }
-
-//        if (!super.canExecute(player)) return false;
-        List<ItemStack> requiredItems = getRequiredItems();
-        if (requiredItems.isEmpty() || requiredItems.stream().allMatch(i -> i.isOf(Items.AIR)))
-            return false;
-        for (Direction side : getPossibleSides()) {
-            if (canSeeBlockFace(player, new BlockHitResult(Vec3d.ofCenter(state.blockPos), side.getOpposite(), state.blockPos.offset(side), false))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     @Override
     protected @NotNull List<ItemStack> getRequiredItems() {
-        if (!canWork) return Collections.emptyList();
-        return Collections.singletonList(new ItemStack(Items.WATER_BUCKET));
+        return List.of(new ItemStack(Items.WATER_BUCKET));
+    }
+
+    private boolean canWaterlog(MinecraftClient client, ClientPlayerEntity player) {
+        if (!PrinterConfig.WATERLOGGING.getBooleanValue() || !targetState.getOrEmpty(Properties.WATERLOGGED).orElse(false)
+                || client.world == null || client.world != state.world || SchematicWorldHandler.getSchematicWorld() != state.schematic
+                || state.schematic.getBlockState(state.blockPos) != targetState
+                || !DataManager.getRenderLayerRange().isPositionWithinRange(state.blockPos)
+                || Printer.hasPendingPlacement(state.blockPos)) return false;
+        BlockState actual = client.world.getBlockState(state.blockPos);
+        if (!actual.isOf(targetState.getBlock()) || actual.get(Properties.WATERLOGGED)
+                || !(actual.getBlock() instanceof Waterloggable block)) return false;
+        // Vanilla falls back to placing a source next to the hit if sneaking or unable to fill it.
+        return !player.hasVehicle() && !player.isSneaking() && !player.getLastPlayerInput().sneak()
+                && !client.options.sneakKey.isPressed()
+                && block.canFillWithFluid(player, client.world, state.blockPos, actual, Fluids.WATER)
+                && !client.world.getEnvironmentAttributes().getAttributeValue(
+                        EnvironmentAttributes.WATER_EVAPORATES_GAMEPLAY, state.blockPos);
     }
 
     @Override
-    public @Nullable PrinterPlacementContext getPlacementContext(ClientPlayerEntity player) {
-        ClientWorld world = MinecraftClient.getInstance().world;
-        if (world == null) return null;
+    public boolean canExecute(ClientPlayerEntity player) {
+        return canWaterlog(MinecraftClient.getInstance(), player) && playerHasRightItem(player)
+                && (!player.getMainHandStack().isOf(Items.WATER_BUCKET) || findAim(player) != null);
+    }
 
-        Vec3d[] hitVecsToTryArray = getPossibleHitVecs();
-        Vec3d playerEyePos = player.getEyePos();
+    @Override
+    public @NotNull List<Action> execute(ClientPlayerEntity player) {
+        return canWaterlog(MinecraftClient.getInstance(), player) ? List.of(new UseWaterBucket()) : List.of();
+    }
 
-        ItemStack requiredItem = getRequiredItem(player).stream().findFirst().orElse(ItemStack.EMPTY);
-        int slot = getRequiredItemStackSlot(player);
+    private record Aim(float yaw, float pitch) {}
 
-        if (slot == -1) return null;
-
-        for (Direction side : getPossibleSides()) {
-            Vec3d hitVec = Vec3d.ofCenter(state.blockPos)
-                    .add(Vec3d.of(side.getVector()).multiply(0.5)); // Center of the block side face we are placing on
-
-            for (Vec3d hitVecToTry : hitVecsToTryArray) {
-                Vec3d multiplier = Vec3d.of(side.getVector());
-                multiplier = new Vec3d(
-                        multiplier.x == 0 ? 1 : 0,
-                        multiplier.y == 0 ? 1 : 0,
-                        multiplier.z == 0 ? 1 : 0); // Offset from the Center of the block side face we are placing on by pre calculated values. This samples different points on that face.
-
-                Vec3d blockHit = hitVec.add(hitVecToTry.multiply(multiplier));
-                Vec3d lookDirection = blockHit.subtract(playerEyePos).normalize();
-                Direction relativeDirection = Direction.getFacing(lookDirection.x, lookDirection.y, lookDirection.z);
-
-                if (playerEyePos.distanceTo(blockHit) > LitematicaMixinMod.PRINTING_RANGE.getDoubleValue()) // Check if the hit vector is in range
-                    continue;
-
-                Vec3d lookVec = blockHit.subtract(playerEyePos).normalize(); // Look vector from the player's eye to the block hit vector
-                Vec3d raycastEnd = playerEyePos.add(lookVec.multiply(5)); // 5 block max distance
-                RaycastContext raycastContext = new RaycastContext(playerEyePos, raycastEnd, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, player);
-                BlockHitResult result = world.raycast(raycastContext);
-                if (result.getType() != HitResult.Type.BLOCK || !result.getBlockPos().equals(state.blockPos)) { // If we didn't hit a block, skip
-                    continue;
-                }
-                if (result.getPos().distanceTo(playerEyePos) > LitematicaMixinMod.PRINTING_RANGE.getDoubleValue()) { // Check if the hit result is in range
-                    continue;
-                }
-
-                PrinterPlacementContext rayTraceContext = new PrinterPlacementContext(player, result, requiredItem, slot, relativeDirection, false);
-                rayTraceContext.canStealth = true;
-                rayTraceContext.isRaytrace = true;
-                return rayTraceContext;
+    @Nullable
+    private Aim findAim(ClientPlayerEntity player) {
+        Vec3d eye = player.getEyePos();
+        double reach = player.getBlockInteractionRange();
+        double limit = Math.min(reach, LitematicaMixinMod.PRINTING_RANGE.getDoubleValue());
+        BlockState actual = state.world.getBlockState(state.blockPos);
+        for (Box local : actual.getOutlineShape(state.world, state.blockPos, ShapeContext.of(player)).getBoundingBoxes()) {
+            Box box = local.offset(state.blockPos);
+            // Try the middle first, then points inside the corners for partly obstructed shapes.
+            Aim center = aimAt(player, eye, box.getCenter(), reach, limit);
+            if (center != null) return center;
+            for (int corner = 0; corner < 8; corner++) {
+                Vec3d point = new Vec3d(box.minX + box.getLengthX() * ((corner & 1) == 0 ? 0.02 : 0.98),
+                        box.minY + box.getLengthY() * ((corner & 2) == 0 ? 0.02 : 0.98),
+                        box.minZ + box.getLengthZ() * ((corner & 4) == 0 ? 0.02 : 0.98));
+                Aim aim = aimAt(player, eye, point, reach, limit);
+                if (aim != null) return aim;
             }
         }
         return null;
     }
 
-    @Override
-    public @NotNull List<Action> execute(ClientPlayerEntity player) {
-        List<Action> actions = new ArrayList<>();
+    @Nullable
+    private Aim aimAt(ClientPlayerEntity player, Vec3d eye, Vec3d point, double reach, double limit) {
+        Vec3d delta = point.subtract(eye);
+        float yaw = MathHelper.wrapDegrees((float) Math.toDegrees(Math.atan2(-delta.x, delta.z)));
+        float pitch = (float) Math.toDegrees(Math.atan2(-delta.y, delta.horizontalLength()));
+        // Match Item.raycast exactly, including the float angles serialized by PlayerInteractItemC2SPacket.
+        Vec3d end = eye.add(player.getRotationVector(pitch, yaw).multiply(reach));
+        BlockHitResult hit = state.world.raycast(new RaycastContext(eye, end,
+                RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, player));
+        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(state.blockPos)
+                && hit.getPos().squaredDistanceTo(eye) <= limit * limit ? new Aim(yaw, pitch) : null;
+    }
 
-        ItemStack requiredItem = getRequiredItem(player).stream().findFirst().orElse(ItemStack.EMPTY);
-        if (requiredItem.isEmpty()) return actions;
-        var ctx = getPlacementContext(player);
-        if (ctx == null) return actions;
+    private final class UseWaterBucket extends Action {
+        @Override
+        public boolean send(MinecraftClient client, ClientPlayerEntity player) {
+            if (client.player != player || client.interactionManager == null || !canWaterlog(client, player)) return false;
+            ItemStack bucket = getRequiredItem(player).stream().findFirst().orElse(ItemStack.EMPTY);
+            if (bucket.isEmpty() || !Printer.inventoryManager.select(bucket)
+                    || !player.getMainHandStack().isOf(Items.WATER_BUCKET) || !canWaterlog(client, player)) return false;
+            // Scaffolding, for example, changes its outline when the previously held item is put away.
+            Aim aim = findAim(player);
+            if (aim == null || !Printer.tryAcquirePlacementPacket()) return false;
 
-        ActionChain chain = new ActionChain();
-        chain.addImmediateAction(new PrepareLook(ctx));
-        chain.addNextTickAction(new PrepareAction(ctx));
-        chain.addNextTickAction(new UseItemActionImpl(ctx));
-
-        actions.add(chain);
-
-        return actions;
+            float yaw = player.getYaw();
+            float pitch = player.getPitch();
+            ActionResult result;
+            try {
+                if (PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) {
+                    MovementHandler.grimRotate(player, aim.yaw, aim.pitch);
+                }
+                player.setYaw(aim.yaw);
+                player.setPitch(aim.pitch);
+                result = client.interactionManager.interactItem(player, Hand.MAIN_HAND);
+                // The server applies the item packet's angles. Let vanilla restore them on its next move.
+                MixinAccessorClientPlayerEntity sent = (MixinAccessorClientPlayerEntity) player;
+                sent.setLastYaw(aim.yaw);
+                sent.setLastPitch(aim.pitch);
+            } finally {
+                player.setYaw(yaw);
+                player.setPitch(pitch);
+            }
+            if (!result.isAccepted()) return false;
+            // The normal item-use path owns the sequence and inventory prediction. Wait for the block update.
+            Printer.trackPlacement(state.blockPos, targetState, bucket, -1);
+            Printer.addTimeout(state.blockPos);
+            player.swingHand(Hand.MAIN_HAND);
+            return true;
+        }
     }
 }

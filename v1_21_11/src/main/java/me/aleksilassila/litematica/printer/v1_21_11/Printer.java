@@ -517,6 +517,12 @@ public class Printer {
     public static void confirmNativePlacement(BlockPos pos, BlockState actual) {
         PendingPlacement pending = pendingPlacements.remove(pos);
         if (pending != null && PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
+            if (pending.stack.isOf(net.minecraft.item.Items.WATER_BUCKET)) {
+                boolean filled = actual.isOf(pending.desired.getBlock())
+                        && actual.get(net.minecraft.state.property.Properties.WATERLOGGED);
+                logger.info("Waterlogging {} at {}", filled ? "confirmed" : "rejected", pos);
+                return;
+            }
             logger.info("Native placement {} at {} (sequence {})",
                     NativePlacementSolver.statesMatch(pending.desired, actual) ? "confirmed" : "rejected",
                     pos, pending.sequence);
