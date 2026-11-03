@@ -4,6 +4,8 @@ import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_11.LitematicaMixinMod;
 import me.aleksilassila.litematica.printer.v1_21_11.MovementHandler;
+import me.aleksilassila.litematica.printer.v1_21_11.Printer;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.PlayerInput;
 import org.spongepowered.asm.mixin.Mixin;
@@ -46,10 +48,11 @@ public class MixinClientPlayerEntity {
     }
 
     @Inject(method = "tickMovement", at = @At("HEAD"))
-    public void tickMovement(CallbackInfo ci) {
-        MixinClientPlayerEntity clientPlayer = this;
-        if (PrinterConfig.PREVENT_DOUBLE_TAP_SPRINTING.getBooleanValue()) {
-            ((MixinAccessorClientPlayerEntity) clientPlayer).setTicksLeftToDoubleTapSprint(0);
+    private void printer$preventDoubleTapSprint(CallbackInfo ci) {
+        ClientPlayerEntity player = (ClientPlayerEntity) (Object) this;
+        if (PrinterConfig.PREVENT_DOUBLE_TAP_SPRINTING.getBooleanValue()
+                && Printer.canRunActions(MinecraftClient.getInstance(), player)) {
+            ((MixinAccessorClientPlayerEntity) player).setTicksLeftToDoubleTapSprint(0);
         }
     }
 }

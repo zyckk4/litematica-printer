@@ -22,9 +22,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(targets = "fi.dy.masa.litematica.gui.GuiSchematicLoad$ButtonListener", remap = false)
 public class ButtonListenerMixin {
 
+    // Replace the local before it is pushed as addSchematic's argument.
     @Inject(method = "actionPerformedWithButton",
             at = @At(
-                    target = "Lfi/dy/masa/litematica/data/SchematicHolder;addSchematic(Lfi/dy/masa/litematica/schematic/LitematicaSchematic;Z)V",
+                    target = "Lfi/dy/masa/litematica/data/SchematicHolder;getInstance()Lfi/dy/masa/litematica/data/SchematicHolder;",
                     value = "INVOKE", shift = At.Shift.BEFORE)
     )
     private void onActionPerformedWithButton(ButtonBase button, int mouseButton, CallbackInfo ci,
@@ -33,7 +34,13 @@ public class ButtonListenerMixin {
         if (!warnType.get() || !PrinterConfig.AUTO_CONVERT_SCHEMATIC_TO_LITEMATIC_ON_LOAD.getBooleanValue()) {
             return;
         }
-        LitematicaSchematic newSchem = SchematicConverter.convertAndReturn(schematic.get().getFile(), entry.getDirectory());
+        LitematicaSchematic newSchem = SchematicConverter.convertAndReturn(
+                schematic.get(), entry.getDirectory(), entry.getName());
+        if (newSchem == null) {
+            // Keep the successfully imported schematic and the loader's
+            // non-Litematica warning when saving or reloading fails.
+            return;
+        }
         warnType.set(false);
         schematic.set(newSchem);
         InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, 15000, "Auto converted schematic to litematic format");

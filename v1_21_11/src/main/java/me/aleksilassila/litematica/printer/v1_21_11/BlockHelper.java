@@ -9,6 +9,12 @@ import java.util.Arrays;
 import java.util.List;
 
 abstract public class BlockHelper {
+    /** The original setting protects still water/lava, while flowing fluids remain replaceable. */
+    public static boolean canReplaceFluid(BlockState current) {
+        return !(current.getBlock() instanceof FluidBlock) || !current.getFluidState().isStill()
+                || LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.getBooleanValue();
+    }
+
     public static List<Class<?>> interactiveBlocks = new ArrayList<>(Arrays.asList(
             AbstractChestBlock.class, AbstractFurnaceBlock.class, CraftingTableBlock.class, LeverBlock.class,
             DoorBlock.class, TrapdoorBlock.class, BedBlock.class, RedstoneWireBlock.class, ScaffoldingBlock.class,

@@ -30,6 +30,7 @@ public class InteractActionImpl extends InteractAction {
     private final MinecraftClient mc = MinecraftClient.getInstance();
     @Override
     protected ActionResult interact(MinecraftClient client, ClientPlayerEntity player, Hand hand, BlockHitResult hitResult) {
+        if (!changesClickedBlock && !context.canSendPlacement(player, hand, hitResult)) return ActionResult.FAIL;
         if (!Printer.tryAcquirePlacementPacket()) {
             return ActionResult.FAIL;
         }

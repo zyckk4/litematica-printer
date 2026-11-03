@@ -35,11 +35,12 @@ public class AirPlaceAction extends InteractAction {
                 || player.getEyePos().squaredDistanceTo(hit.getPos()) > player.getBlockInteractionRange() * player.getBlockInteractionRange()) {
             return ActionResult.FAIL;
         }
+        BlockHitResult wire = new BlockHitResult(hit.getPos(), hit.getSide(), target, false);
+        if (!context.canSendPlacement(player, Hand.MAIN_HAND, wire)) return ActionResult.FAIL;
         var predicted = item.getPlacementState(context);
         if (predicted == null || !Printer.tryAcquirePlacementPacket()) return ActionResult.FAIL;
         boolean swap = PrinterConfig.PRINTER_NATIVE_GRIM_AIRPLACE.getBooleanValue();
         Hand hand = swap ? Hand.OFF_HAND : Hand.MAIN_HAND;
-        BlockHitResult wire = new BlockHitResult(hit.getPos(), hit.getSide(), target, false);
         if (swap) swapHands(client);
         try {
             client.interactionManager.sendSequencedPacket(client.world, sequence -> {

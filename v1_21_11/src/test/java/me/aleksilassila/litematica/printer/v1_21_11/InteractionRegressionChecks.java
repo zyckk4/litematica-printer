@@ -13,6 +13,7 @@ import me.aleksilassila.litematica.printer.v1_21_11.implementation.actions.Inter
 import me.aleksilassila.litematica.printer.v1_21_11.mixin.MixinAccessorClientPlayerEntity;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.ComparatorMode;
+import net.minecraft.block.enums.RailShape;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.input.Input;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
@@ -32,6 +33,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -279,6 +281,7 @@ public final class InteractionRegressionChecks {
         List<Printer.BlockTimeout> previousTimeouts = List.copyOf(Printer.blockPosTimeout);
         try {
             limiter.reset();
+            assertions += LogFluidRegressionChecks.run(client, player, schematic, world.blocks, target);
             PrinterConfig.NATIVE_BURST.setIntegerValue(9);
             // Use the maximum window so normal headless execution does not rely
             // on finishing these real production action calls within 310 ms.
@@ -295,6 +298,7 @@ public final class InteractionRegressionChecks {
             limiter.reset();
             PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(false);
             checkScaffoldingBucketSwitch(fixture, world, schematic);
+            checkMovingInteractions(fixture, world, schematic, limiter);
         } finally {
             set(SchematicWorldHandler.class, SchematicWorldHandler.INSTANCE, "world", previousSchematic);
             inventoryClient.set(Printer.inventoryManager, previousInventoryClient);
@@ -480,8 +484,177 @@ public final class InteractionRegressionChecks {
                 "Used the old scaffolding outline and aimed through its hollow center");
     }
 
+    private static void checkMovingInteractions(Fixture fixture, FixtureWorld world, FixtureSchematic schematic,
+                                                PlacementRateLimiter limiter) throws Exception {
+        var player = fixture.player;
+        var client = fixture.client;
+        var target = schematic.target;
+        boolean printing = LitematicaMixinMod.PRINT_MODE.getBooleanValue();
+        boolean nativeMoving = PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue();
+        boolean nativeOmni = PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
+        boolean stop = PrinterConfig.STOP_ON_MOVEMENT.getBooleanValue();
+        try {
+            LitematicaMixinMod.PRINT_MODE.setBooleanValue(true);
+            PrinterConfig.PRINTER_NATIVE_MOVING.setBooleanValue(true);
+            PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(true);
+            PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(false);
+            PrinterConfig.WATERLOGGING.setBooleanValue(true);
+            PrinterConfig.NATIVE_BURST.setIntegerValue(9);
+            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(64);
+            limiter.reset();
+            set(MinecraftClient.class, client, "cameraEntity", player);
+            set(Entity.class, player, "velocity", new Vec3d(0.16, 0, 0));
+            set(Entity.class, player, "dimensions", net.minecraft.entity.EntityDimensions.fixed(0.6F, 1.8F));
+            set(Entity.class, player, "blockPos", new BlockPos(0, 64, 0));
+            for (String key : List.of("forwardKey", "backKey", "leftKey", "rightKey"))
+                set(GameOptions.class, client.options, key, fixture.unsafe.allocateInstance(KeyBinding.class));
+            player.setYaw(0);
+            player.setPitch(0);
+            ((MixinAccessorClientPlayerEntity) (Object) player).setLastYaw(0);
+            ((MixinAccessorClientPlayerEntity) (Object) player).setLastPitch(0);
+            Printer printer = new Printer(client, player);
+            fill(player, ItemStack.EMPTY);
+            world.blocks.clear();
+            BlockState repeater = Blocks.REPEATER.getDefaultState();
+            world.blocks.put(target, repeater);
+            schematic.desired = repeater.with(RepeaterBlock.DELAY, 4);
+            fixture.network.blockPackets = new ArrayList<>();
+            int clicks = fixture.network.blockPackets.size();
+            check(schedule(printer), "Moving repeater was not scheduled");
+            check(fixture.network.blockPackets.size() == clicks, "Moving tune ran before movement");
+            player.reach = 0.5;
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == clicks, "A queued tune ignored post-movement reach");
+            player.reach = 4.5;
+            check(schedule(printer), "Moving tune did not resume when back in reach");
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == clicks + 1
+                    && fixture.network.blockPackets.get(clicks).getBlockHitResult().getBlockPos().equals(target),
+                    "Missing directed repeater packet");
+            Printer.confirmNativePlacement(target, repeater.with(RepeaterBlock.POWERED, true));
+            check(Printer.hasPendingPlacement(target) && !printer.onGameTick(), "An unrelated update repeated a dial click");
+            Printer.confirmNativePlacement(target, repeater.with(RepeaterBlock.DELAY, 2));
+            check(!Printer.hasPendingPlacement(target), "Next dial step was not confirmed");
+
+            BlockState dry = Blocks.OAK_SLAB.getDefaultState();
+            world.blocks.put(target, dry);
+            schematic.desired = dry.with(Properties.WATERLOGGED, true);
+            player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+            check(schedule(printer), "Moving waterlogging was not scheduled");
+            int uses = fixture.network.uses.size();
+            world.blocks.put(target.north(), Blocks.STONE.getDefaultState());
+            printer.flushNativePlacements();
+            check(fixture.network.uses.size() == uses, "Moving bucket did not revalidate its ray after movement");
+            world.blocks.remove(target.north());
+            check(schedule(printer), "Reachable moving bucket failed rescan");
+            printer.flushNativePlacements();
+            check(fixture.network.uses.size() == uses + 1 && target.equals(world.emptiedAt), "Moving bucket missed target");
+            Printer.confirmNativePlacement(target, schematic.desired);
+
+            world.blocks.clear();
+            BlockState rail = Blocks.RAIL.getDefaultState();
+            schematic.desired = rail;
+            player.inventory.main.set(1, new ItemStack(Items.RAIL));
+            world.blocks.put(target.down(), Blocks.STONE.getDefaultState());
+            check(schedule(printer), "Moving flat rail was not scheduled");
+            clicks = fixture.network.blockPackets.size();
+            world.blocks.remove(target.down());
+            MovementHandler.onMovementSent(player);
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == clicks, "Rail was placed after losing its support");
+            world.blocks.put(target.down(), Blocks.STONE.getDefaultState());
+            check(schedule(printer), "Supported rail did not rescan");
+            ((MixinAccessorClientPlayerEntity) (Object) player).setLastYaw(player.getYaw());
+            ((MixinAccessorClientPlayerEntity) (Object) player).setLastPitch(player.getPitch());
+            MovementHandler.onMovementSent(player);
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == clicks + 1 && Printer.hasPendingPlacement(target),
+                    "Supported moving rail was not sent");
+            Printer.confirmNativePlacement(target, rail);
+
+            schematic.desired = rail.with(Properties.RAIL_SHAPE, net.minecraft.block.enums.RailShape.ASCENDING_EAST);
+            check(MovingPrinterAction.railPlacementSeed(new SchematicBlockState(world, schematic, target), (AbstractRailBlock) Blocks.RAIL) == null,
+                    "Slope rail accepted a missing high support");
+            world.blocks.put(target.east(), Blocks.STONE.getDefaultState());
+            Printer.trackPlacement(target.east().up(), rail, new ItemStack(Items.RAIL), -1);
+            check(MovingPrinterAction.railPlacementSeed(new SchematicBlockState(world, schematic, target), (AbstractRailBlock) Blocks.RAIL) == null,
+                    "Slope rail ignored pending upper track");
+            Printer.confirmNativePlacement(target.east().up(), rail);
+            PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(true);
+            check(!printer.onGameTick(), "Moving interaction bypassed StopOnMovement");
+            checkRailConnections(world, schematic, target);
+        } finally {
+            LitematicaMixinMod.PRINT_MODE.setBooleanValue(printing);
+            PrinterConfig.PRINTER_NATIVE_MOVING.setBooleanValue(nativeMoving);
+            PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(nativeOmni);
+            PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(stop);
+        }
+    }
+
+    private static void checkRailConnections(FixtureWorld world, FixtureSchematic schematic, BlockPos target) throws Exception {
+        BlockState rail = Blocks.RAIL.getDefaultState();
+        var entry = Blocks.RAIL.getRegistryEntry();
+        Field tagField = net.minecraft.registry.entry.RegistryEntry.Reference.class.getDeclaredField("tags");
+        tagField.setAccessible(true);
+        Object oldTags = tagField.get(entry);
+        // Headless bootstrap has no server-supplied rail tag. Exercise the real vanilla neighbor algorithm.
+        tagField.set(entry, java.util.Set.of(net.minecraft.registry.tag.BlockTags.RAILS));
+        try {
+            world.blocks.clear();
+            world.blocks.put(target.down(), Blocks.STONE.getDefaultState());
+            schematic.desired = rail.with(Properties.RAIL_SHAPE, RailShape.NORTH_EAST);
+            SchematicBlockState curve = new SchematicBlockState(world, schematic, target);
+            check(MovingPrinterAction.railPlacementSeed(curve, (AbstractRailBlock) Blocks.RAIL) == null,
+                    "Impossible isolated curve accepted as a permanently straight rail");
+            schematic.neighbors = Map.of(target.north(), rail, target.east(), rail.with(Properties.RAIL_SHAPE, RailShape.EAST_WEST));
+            BlockState first = MovingPrinterAction.railPlacementSeed(curve, (AbstractRailBlock) Blocks.RAIL);
+            check(first != null, "Could not start a schematic curve before its neighbors exist");
+            for (BlockPos pos : List.of(target, target.east(), target.north())) {
+                BlockState placed = pos.equals(target) ? first : schematic.getBlockState(pos);
+                world.blocks.put(pos, placed);
+                new RailPlacementHelper(world, pos, placed).updateBlockState(false, true, placed.get(Properties.RAIL_SHAPE));
+            }
+            check(world.getBlockState(target).get(Properties.RAIL_SHAPE) == RailShape.NORTH_EAST,
+                    "A staged curve did not converge after vanilla connected its neighbors");
+            schematic.neighbors = Map.of();
+            for (var shape : List.of(RailShape.NORTH_EAST, RailShape.ASCENDING_EAST)) {
+                world.blocks.clear();
+                world.blocks.put(target.down(), Blocks.STONE.getDefaultState());
+                schematic.desired = rail.with(Properties.RAIL_SHAPE, shape);
+                if (shape.isAscending()) {
+                    world.blocks.put(target.east(), Blocks.STONE.getDefaultState());
+                    world.blocks.put(target.east().up(), rail.with(Properties.RAIL_SHAPE, RailShape.EAST_WEST));
+                } else {
+                    world.blocks.put(target.north(), rail);
+                    world.blocks.put(target.east(), rail.with(Properties.RAIL_SHAPE, RailShape.EAST_WEST));
+                }
+                SchematicBlockState state = new SchematicBlockState(world, schematic, target);
+                BlockState seed = MovingPrinterAction.railPlacementSeed(state, (AbstractRailBlock) Blocks.RAIL);
+                check(seed != null, "Ready curve/slope was deferred: " + shape);
+                world.blocks.put(target, seed);
+                BlockState result = new RailPlacementHelper(world, target, seed)
+                        .updateBlockState(false, true, seed.get(Properties.RAIL_SHAPE)).getBlockState();
+                check(result.get(Properties.RAIL_SHAPE) == shape, "Vanilla neighbor updates produced wrong moving rail " + shape);
+                world.blocks.remove(target);
+                world.blocks.put(target.south(), rail);
+                check(MovingPrinterAction.railPlacementSeed(state, (AbstractRailBlock) Blocks.RAIL) == null,
+                        "Unstable junction was allowed to turn another rail");
+            }
+        } finally {
+            schematic.neighbors = Map.of();
+            tagField.set(entry, oldTags);
+        }
+    }
+
+    private static boolean schedule(Printer printer) {
+        // Even if the 3 ms budget permits only one entry per scan, this cube covers a full rotation.
+        int side = 3 + 2 * (int) Math.ceil(LitematicaMixinMod.PRINTING_RANGE.getDoubleValue());
+        for (int i = 0; i < side * side * side; i++) if (printer.onGameTick()) return true;
+        return false;
+    }
+
     private static final class ProbeBlockAction extends InteractActionImpl {
-        private ProbeBlockAction(PrinterPlacementContext context) { super(context); }
+        private ProbeBlockAction(PrinterPlacementContext context) { super(context, true); }
         @Override protected BlockPos getTimeoutPos() { return BlockPos.ORIGIN; }
     }
 
@@ -496,9 +669,11 @@ public final class InteractionRegressionChecks {
     private static final class FixtureSchematic extends WorldSchematic {
         private BlockPos target;
         private BlockState desired;
+        private Map<BlockPos, BlockState> neighbors;
         private FixtureSchematic() { super(null, null, null, null); }
         @Override public BlockState getBlockState(BlockPos pos) {
-            return pos.equals(target) ? desired : Blocks.AIR.getDefaultState();
+            return pos.equals(target) ? desired : neighbors == null ? Blocks.AIR.getDefaultState()
+                    : neighbors.getOrDefault(pos, Blocks.AIR.getDefaultState());
         }
     }
 
@@ -512,6 +687,15 @@ public final class InteractionRegressionChecks {
         @Override public FluidState getFluidState(BlockPos pos) { return getBlockState(pos).getFluidState(); }
         @Override public boolean isClient() { return true; }
         @Override public WorldBorder getWorldBorder() { return border; }
+        @Override public boolean isInBuildLimit(BlockPos pos) { return pos.getY() >= -64 && pos.getY() < 320; }
+        @Override public boolean setBlockState(BlockPos pos, BlockState block, int flags) {
+            blocks.put(pos.toImmutable(), block);
+            return true;
+        }
+        @Override public net.minecraft.resource.featuretoggle.FeatureSet getEnabledFeatures() {
+            return net.minecraft.resource.featuretoggle.FeatureFlags.VANILLA_FEATURES;
+        }
+        @Override public boolean doesNotIntersectEntities(Entity except, net.minecraft.util.shape.VoxelShape shape) { return true; }
         @Override public WorldEnvironmentAttributeAccess getEnvironmentAttributes() { return attributes; }
         @Override public void playSound(Entity source, BlockPos pos, SoundEvent sound, SoundCategory cat, float volume, float pitch) {
             emptiedAt = pos.toImmutable();
@@ -531,6 +715,9 @@ public final class InteractionRegressionChecks {
         @Override public PlayerAbilities getAbilities() { return abilities; }
         @Override public ItemStack getOffHandStack() { return offhand; }
         @Override public boolean isSneaking() { return sneaking; }
+        @Override public boolean isAlive() { return true; }
+        @Override public boolean isUsingItem() { return false; }
+        @Override public boolean isSprinting() { return false; }
         @Override public boolean isDescending() { return sneaking; }
         @Override public double getBlockInteractionRange() { return reach; }
         @Override public ItemStack getMainHandStack() { return inventory.main.get(inventory.selectedSlot); }
@@ -547,8 +734,10 @@ public final class InteractionRegressionChecks {
         private FixtureNetwork() { super(null, null, null); }
         @Override public net.minecraft.client.network.PlayerListEntry getPlayerListEntry(java.util.UUID uuid) { return null; }
         private List<PlayerInteractItemC2SPacket> uses;
+        private List<PlayerInteractBlockC2SPacket> blockPackets;
         @Override public void sendPacket(Packet<?> packet) {
             if (packet instanceof PlayerInteractItemC2SPacket use) uses.add(use);
+            if (packet instanceof PlayerInteractBlockC2SPacket use && blockPackets != null) blockPackets.add(use);
         }
     }
 

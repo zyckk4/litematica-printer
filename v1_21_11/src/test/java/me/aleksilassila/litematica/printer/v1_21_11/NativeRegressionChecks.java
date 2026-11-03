@@ -34,9 +34,11 @@ public final class NativeRegressionChecks {
         int placementChecks = NativePlacementContextChecks.run();
         int solverChecks = NativePlacementSolverChecks.run();
         int interactionChecks = InteractionRegressionChecks.run();
+        int conversionChecks = SchematicConversionRegressionChecks.run();
         System.out.println("Native regression checks passed: " + assertions
                 + " movement/rate assertions; " + placementChecks + " placement-context assertions; "
-                + solverChecks + " full-solver assertions; " + interactionChecks + " state/inventory/interaction assertions.");
+                + solverChecks + " full-solver assertions; " + interactionChecks + " state/inventory/interaction assertions; "
+                + conversionChecks + " schematic-conversion assertions.");
     }
 
     private static void checkLatticeAgainstVanilla() throws Exception {
