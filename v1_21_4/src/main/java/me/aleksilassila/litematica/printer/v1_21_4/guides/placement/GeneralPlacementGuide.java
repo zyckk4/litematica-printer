@@ -351,9 +351,6 @@ public class GeneralPlacementGuide extends PlacementGuide {
             }
         }
 
-//        if (PrinterConfig.PRINTER_AIRPLACE_FLOATING_ONLY.getBooleanValue() && !isInAir(state.blockPos)) {
-//            return null;
-//        }
 //        if (Printer.inactivityCounter < PrinterConfig.PRINTER_MIN_INACTIVE_TIME_AIR_PLACE.getIntegerValue()) {
 //            return null;
 //        }

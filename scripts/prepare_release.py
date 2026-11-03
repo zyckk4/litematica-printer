@@ -45,6 +45,7 @@ def public_path(relative):
 
 def zip_entry(archive, name, content, executable=False):
     info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    info.create_system = 3  # Store Unix permissions consistently on all build hosts.
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = (0o100755 if executable else 0o100644) << 16
     archive.writestr(info, content)

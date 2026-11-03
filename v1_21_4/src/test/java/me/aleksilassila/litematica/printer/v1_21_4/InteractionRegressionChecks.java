@@ -1,12 +1,16 @@
 package me.aleksilassila.litematica.printer.v1_21_4;
 
+import fi.dy.masa.litematica.world.SchematicWorldHandler;
+import fi.dy.masa.litematica.world.WorldSchematic;
 import me.aleksilassila.litematica.printer.v1_21_4.actions.Action;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.Guide;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.interaction.CycleStateGuide;
+import me.aleksilassila.litematica.printer.v1_21_4.guides.interaction.WaterLogGuide;
+import me.aleksilassila.litematica.printer.v1_21_4.guides.placement.SlabGuide;
 import me.aleksilassila.litematica.printer.v1_21_4.implementation.PrinterPlacementContext;
 import me.aleksilassila.litematica.printer.v1_21_4.implementation.actions.InteractActionImpl;
-import me.aleksilassila.litematica.printer.v1_21_4.implementation.actions.UseItemActionImpl;
+import me.aleksilassila.litematica.printer.v1_21_4.mixin.MixinAccessorClientPlayerEntity;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.ComparatorMode;
 import net.minecraft.client.MinecraftClient;
@@ -14,25 +18,49 @@ import net.minecraft.client.input.Input;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
+import net.minecraft.client.network.PendingUpdateManager;
+import net.minecraft.client.option.GameOptions;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.ItemCooldownManager;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
+import net.minecraft.fluid.FluidState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
+import net.minecraft.registry.BuiltinRegistries;
+import net.minecraft.registry.RegistryKeys;
 import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
+import net.minecraft.util.PlayerInput;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
+import net.minecraft.world.dimension.DimensionType;
+import net.minecraft.world.dimension.DimensionTypes;
+import net.minecraft.world.border.WorldBorder;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Real guide, inventory and interaction actions with headless captured sinks. */
 public final class InteractionRegressionChecks {
@@ -44,8 +72,9 @@ public final class InteractionRegressionChecks {
         MinecraftClient previous = MinecraftClient.getInstance();
         String slots = PrinterConfig.PRINTER_HOTBAR_SLOTS.getStringValue();
         try {
-            checkEmptyHandSelection();
-            checkUseItemSharesInteractionBudget();
+            Fixture fixture = createFixture();
+            checkEmptyHandSelection(fixture);
+            checkWaterlogging(fixture);
         } finally {
             set(MinecraftClient.class, null, "instance", previous);
             PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString(slots);
@@ -100,7 +129,10 @@ public final class InteractionRegressionChecks {
         }
     }
 
-    private static void checkEmptyHandSelection() throws Exception {
+    private record Fixture(Unsafe unsafe, MinecraftClient client, FixturePlayer player,
+                           FixtureNetwork network, FixtureInteraction interaction) {}
+
+    private static Fixture createFixture() throws Exception {
         Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
         unsafeField.setAccessible(true);
         Unsafe unsafe = (Unsafe) unsafeField.get(null);
@@ -108,6 +140,7 @@ public final class InteractionRegressionChecks {
         FixturePlayer player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
         player.inventory = new PlayerInventory(player);
         player.abilities = new PlayerAbilities();
+        set(PlayerEntity.class, player, "abilities", player.abilities);
         player.offhand = new ItemStack(Items.TORCH, 12);
         PlayerScreenHandler screen = (PlayerScreenHandler) unsafe.allocateInstance(PlayerScreenHandler.class);
         screen.setCursorStack(ItemStack.EMPTY);
@@ -121,6 +154,14 @@ public final class InteractionRegressionChecks {
         client.player = player;
         client.interactionManager = interaction;
         set(MinecraftClient.class, null, "instance", client);
+        return new Fixture(unsafe, client, player, network, interaction);
+    }
+
+    private static void checkEmptyHandSelection(Fixture fixture) throws Exception {
+        Unsafe unsafe = fixture.unsafe;
+        FixturePlayer player = fixture.player;
+        FixtureInteraction interaction = fixture.interaction;
+        PlayerScreenHandler screen = player.playerScreenHandler;
         Constructor<InventoryManager> constructor = InventoryManager.class.getDeclaredConstructor();
         constructor.setAccessible(true);
         InventoryManager manager = constructor.newInstance();
@@ -174,31 +215,70 @@ public final class InteractionRegressionChecks {
         ScreenHandler other = (ScreenHandler) unsafe.allocateInstance(PlayerScreenHandler.class);
         player.currentScreenHandler = other;
         check(!manager.select(ItemStack.EMPTY), "Open container guard was bypassed");
+        player.currentScreenHandler = screen;
     }
 
     private static void fill(FixturePlayer player, ItemStack stack) {
         for (int i = 0; i < 36; i++) player.inventory.main.set(i, stack.copy());
     }
 
-    private static void checkUseItemSharesInteractionBudget() throws Exception {
-        Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
-        unsafeField.setAccessible(true);
-        Unsafe unsafe = (Unsafe) unsafeField.get(null);
-        MinecraftClient client = (MinecraftClient) unsafe.allocateInstance(MinecraftClient.class);
-        FixturePlayer player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
-        FixtureInteraction interaction = (FixtureInteraction) unsafe.allocateInstance(FixtureInteraction.class);
+    private static void checkWaterlogging(Fixture fixture) throws Exception {
+        MinecraftClient client = fixture.client;
+        FixturePlayer player = fixture.player;
+        BlockPos target = new BlockPos(0, 65, 3);
+        BlockState dry = Blocks.OAK_SLAB.getDefaultState();
+        BlockState wet = dry.with(Properties.WATERLOGGED, true);
+        FixtureWorld world = (FixtureWorld) fixture.unsafe.allocateInstance(FixtureWorld.class);
+        world.blocks = new HashMap<>();
+        world.border = new WorldBorder();
+        var dimensions = BuiltinRegistries.createWrapperLookup().getOrThrow(RegistryKeys.DIMENSION_TYPE);
+        world.dimension = dimensions.getOrThrow(DimensionTypes.OVERWORLD).value();
+        set(net.minecraft.world.World.class, world, "isClient", true);
+        set(ClientWorld.class, world, "pendingUpdateManager", new PendingUpdateManager());
+        set(Entity.class, player, "world", world);
+        set(Entity.class, player, "pos", new Vec3d(0.5, 64.0, 0.5));
+        set(Entity.class, player, "standingEyeHeight", 1.62F);
+        set(Entity.class, player, "boundingBox", new Box(0.2, 64, 0.2, 0.8, 65.8, 0.8));
+        set(ClientPlayerEntity.class, player, "lastPlayerInput", PlayerInput.DEFAULT);
         player.input = new Input();
-        set(ClientPlayerEntity.class, player, "networkHandler", unsafe.allocateInstance(FixtureNetwork.class));
-        client.player = player;
-        client.interactionManager = interaction;
-        set(MinecraftClient.class, null, "instance", client);
-
+        GameOptions options = (GameOptions) fixture.unsafe.allocateInstance(GameOptions.class);
+        set(GameOptions.class, options, "sneakKey", fixture.unsafe.allocateInstance(KeyBinding.class));
+        set(MinecraftClient.class, client, "options", options);
+        player.cooldowns = new ItemCooldownManager();
+        player.reach = 4.5;
+        player.abilities.allowModifyWorld = true;
+        client.world = world;
+        world.blocks.put(target, dry);
+        BlockPos crosshairBlock = new BlockPos(-3, 65, 0);
+        world.blocks.put(crosshairBlock, Blocks.STONE.getDefaultState());
+        player.setYaw(90);
+        player.setPitch(0);
+        client.crosshairTarget = new BlockHitResult(crosshairBlock.toCenterPos(), Direction.EAST, crosshairBlock, false);
+        fixture.network.uses = new ArrayList<>();
+        FixtureSchematic schematic = (FixtureSchematic) fixture.unsafe.allocateInstance(FixtureSchematic.class);
+        schematic.target = target;
+        schematic.desired = wet;
+        Field schematicWorldField = SchematicWorldHandler.class.getDeclaredField("world");
+        schematicWorldField.setAccessible(true);
+        WorldSchematic previousSchematic = (WorldSchematic) schematicWorldField.get(SchematicWorldHandler.INSTANCE);
+        set(SchematicWorldHandler.class, SchematicWorldHandler.INSTANCE, "world", schematic);
+        Field inventoryClient = InventoryManager.class.getDeclaredField("mc");
+        inventoryClient.setAccessible(true);
+        MinecraftClient previousInventoryClient = (MinecraftClient) inventoryClient.get(Printer.inventoryManager);
+        inventoryClient.set(Printer.inventoryManager, client);
+        Printer.inventoryManager.reset();
+        fill(player, ItemStack.EMPTY);
+        player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+        player.inventory.selectedSlot = 0;
+        boolean previousWaterlogging = PrinterConfig.WATERLOGGING.getBooleanValue();
         Field rateField = Printer.class.getDeclaredField("placementRate");
         rateField.setAccessible(true);
         PlacementRateLimiter limiter = (PlacementRateLimiter) rateField.get(null);
         int previousBurst = PrinterConfig.NATIVE_BURST.getIntegerValue();
         int previousWindow = PrinterConfig.INTERACTION_WINDOW_MS.getIntegerValue();
         int previousLimit = PrinterConfig.INTERACTION_WINDOW_LIMIT.getIntegerValue();
+        int previousTimeout = PrinterConfig.BLOCK_TIMEOUT.getIntegerValue();
+        boolean previousGrim = PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue();
         List<Printer.BlockTimeout> previousTimeouts = List.copyOf(Printer.blockPosTimeout);
         try {
             limiter.reset();
@@ -207,41 +287,31 @@ public final class InteractionRegressionChecks {
             // on finishing these real production action calls within 310 ms.
             PrinterConfig.INTERACTION_WINDOW_MS.setIntegerValue(10_000);
             PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(2);
-            PrinterPlacementContext context = (PrinterPlacementContext) unsafe.allocateInstance(PrinterPlacementContext.class);
-            Action item = new ProbeUseItemAction(context);
+            PrinterConfig.BLOCK_TIMEOUT.setIntegerValue(0);
+            PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(true);
+            PrinterPlacementContext context = (PrinterPlacementContext) fixture.unsafe.allocateInstance(PrinterPlacementContext.class);
             Action block = new ProbeBlockAction(context);
-
-            check(item.send(client, player), "Production item-use action was not accepted");
-            check(block.send(client, player), "Block interaction did not share remaining item-use budget");
-            check(interaction.itemUses == 1 && interaction.blockUses == 1, "Interactions did not reach the captured manager");
-            check(!item.send(client, player), "Item use bypassed exhausted shared budget");
-            check(!block.send(client, player), "Block interaction bypassed exhausted shared budget");
-            check(interaction.itemUses == 1 && interaction.blockUses == 1 && player.swings == 2,
-                    "Rejected budget still invoked interaction or swing");
-            player.age++;
-            check(!item.send(client, player), "Item use obtained a fresh rolling budget on tick change");
-            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(3);
-            check(item.send(client, player), "Raising the configured budget did not allow the remaining item use");
-            check(!block.send(client, player), "Live limit change reset production usage");
-            check(interaction.itemUses == 2 && interaction.blockUses == 1, "Wrong number of production interactions");
-
+            Action item = checkWaterloggingGuards(fixture, schematic);
+            set(ClientPlayerEntity.class, player, "lastSneaking", true);
+            check(!item.send(client, player), "Bucket fired before the 1.21.4 server sneak command was released");
+            set(ClientPlayerEntity.class, player, "lastSneaking", false);
+            world.dimension = dimensions.getOrThrow(DimensionTypes.THE_NETHER).value();
+            check(!item.send(client, player), "Bucket fired in a dimension where the water would evaporate");
+            world.dimension = dimensions.getOrThrow(DimensionTypes.OVERWORLD).value();
+            checkBucketHit(fixture, schematic, item);
+            checkSharedInteractionBudget(fixture, item, block, limiter, target, dry);
+            fixture.interaction.throwOnUse = false;
             limiter.reset();
-            PrinterConfig.NATIVE_BURST.setIntegerValue(1);
-            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(9);
-            check(item.send(client, player), "First item use under one-per-tick burst denied");
-            check(!block.send(client, player), "Block interaction ignored item-use burst consumption");
-            player.age++;
-            check(block.send(client, player), "Next tick did not refresh the shared interaction burst");
-
-            limiter.reset();
-            PrinterConfig.NATIVE_BURST.setIntegerValue(9);
-            PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(1);
-            interaction.rejectItemUse = true;
-            int priorUses = interaction.itemUses;
-            check(!item.send(client, player), "Rejected item-use result was reported as successful");
-            check(interaction.itemUses == priorUses + 1, "Rejected attempt never reached interaction manager");
-            check(!block.send(client, player), "An attempted item use refunded its network budget after rejection");
+            PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(false);
+            checkScaffoldingBucketSwitch(fixture, world, schematic);
         } finally {
+            set(SchematicWorldHandler.class, SchematicWorldHandler.INSTANCE, "world", previousSchematic);
+            inventoryClient.set(Printer.inventoryManager, previousInventoryClient);
+            Printer.inventoryManager.reset();
+            Printer.confirmNativePlacement(target, dry);
+            PrinterConfig.WATERLOGGING.setBooleanValue(previousWaterlogging);
+            PrinterConfig.BLOCK_TIMEOUT.setIntegerValue(previousTimeout);
+            PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(previousGrim);
             PrinterConfig.NATIVE_BURST.setIntegerValue(previousBurst);
             PrinterConfig.INTERACTION_WINDOW_MS.setIntegerValue(previousWindow);
             PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(previousLimit);
@@ -251,11 +321,172 @@ public final class InteractionRegressionChecks {
         }
     }
 
-    // Keep production send/interact behavior; only avoid constructing a world
-    // for the successful action's timeout location.
-    private static final class ProbeUseItemAction extends UseItemActionImpl {
-        private ProbeUseItemAction(PrinterPlacementContext context) { super(context); }
-        @Override protected BlockPos getTimeoutPos() { return BlockPos.ORIGIN; }
+    private static Action checkWaterloggingGuards(Fixture fixture, FixtureSchematic schematic) {
+        MinecraftClient client = fixture.client;
+        FixturePlayer player = fixture.player;
+        FixtureWorld world = (FixtureWorld) client.world;
+        BlockPos target = schematic.target;
+        BlockState dry = world.getBlockState(target);
+        BlockState wet = schematic.desired;
+        WaterLogGuide guide = new WaterLogGuide(new SchematicBlockState(world, schematic, target));
+        PrinterConfig.WATERLOGGING.setBooleanValue(false);
+        check(!guide.canExecute(player) && guide.execute(player).isEmpty(), "Disabled printer scheduled a water bucket");
+        PrinterConfig.WATERLOGGING.setBooleanValue(true);
+        world.blocks.remove(target);
+        world.blocks.put(target.down(), Blocks.STONE.getDefaultState());
+        player.inventory.main.set(4, new ItemStack(Items.OAK_SLAB));
+        check(new SlabGuide(new SchematicBlockState(world, schematic, target)).canExecute(player),
+                "Legacy guide could not place the dry slab before waterlogging");
+        check(!guide.canExecute(player), "Waterlogging tried to place a water source in empty space");
+        world.blocks.put(target, dry);
+        check(guide.canExecute(player), "Printer did not find a reachable dry slab behind the camera view");
+        List<Action> actions = guide.execute(player);
+        check(actions.size() == 1, "Expected one targeted waterlogging action");
+        Action item = actions.getFirst();
+        PrinterConfig.WATERLOGGING.setBooleanValue(false);
+        check(!item.send(client, player), "Disabling waterlogging left a queued bucket use active");
+        PrinterConfig.WATERLOGGING.setBooleanValue(true);
+        schematic.desired = dry;
+        check(!item.send(client, player), "Queued bucket ignored a schematic edit to dry");
+        world.blocks.put(target, wet);
+        check(!new WaterLogGuide(new SchematicBlockState(world, schematic, target)).canExecute(player),
+                "Wet world / dry schematic scheduled a full bucket");
+        schematic.desired = wet;
+        check(!item.send(client, player), "Already waterlogged target received a second bucket");
+        world.blocks.put(target, Blocks.STONE_SLAB.getDefaultState());
+        check(!item.send(client, player), "Different waterloggable block received a bucket");
+        world.blocks.put(target, dry);
+        world.blocks.put(target.north(), Blocks.STONE.getDefaultState());
+        check(!item.send(client, player), "New obstruction redirected the queued water bucket");
+        world.blocks.remove(target.north());
+        player.reach = 2;
+        check(!item.send(client, player), "Bucket reached outside current player interaction range");
+        player.reach = 4.5;
+        player.sneaking = true;
+        check(!item.send(client, player), "Sneak-use could empty the bucket in a neighbor");
+        player.sneaking = false;
+        client.options.sneakKey.setPressed(true);
+        check(!item.send(client, player), "Pending sneak input could spill water");
+        client.options.sneakKey.setPressed(false);
+        world.blocks.put(target, dry.with(SlabBlock.TYPE, net.minecraft.block.enums.SlabType.DOUBLE));
+        check(!item.send(client, player), "A double slab cannot take water and could redirect it");
+        world.blocks.put(target, dry);
+        check(fixture.interaction.itemUses == 0 && fixture.network.uses.isEmpty(), "Rejected targets emitted bucket use");
+        player.inventory.main.set(2, ItemStack.EMPTY);
+        check(!guide.canExecute(player) && !item.send(client, player), "Missing water bucket was accepted");
+        player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+        return item;
+    }
+
+    private static void checkBucketHit(Fixture fixture, FixtureSchematic schematic, Action item) {
+        MinecraftClient client = fixture.client;
+        FixturePlayer player = fixture.player;
+        FixtureWorld world = (FixtureWorld) client.world;
+        BlockPos target = schematic.target;
+        HitResult originalCrosshair = client.crosshairTarget;
+        check(item.send(client, player), "Production waterlogging action was not accepted");
+        check(fixture.network.uses.size() == 1, "Expected one vanilla item-use packet");
+        PlayerInteractItemC2SPacket use = fixture.network.uses.getFirst();
+        check(use.getHand() == Hand.MAIN_HAND && use.getSequence() > 0, "Wrong hand or unsequenced bucket use");
+        Vec3d eye = player.getEyePos();
+        Vec3d end = eye.add(player.getRotationVector(use.getPitch(), use.getYaw()).multiply(player.getBlockInteractionRange()));
+        BlockHitResult serverHit = world.raycast(new RaycastContext(eye, end, RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE, player));
+        check(serverHit.getType() == HitResult.Type.BLOCK && target.equals(serverHit.getBlockPos()),
+                "Vanilla ray cast with packet angles missed the target");
+        MixinAccessorClientPlayerEntity sent = (MixinAccessorClientPlayerEntity) (ClientPlayerEntity) player;
+        check(sent.getLastYaw() == use.getYaw() && sent.getLastPitch() == use.getPitch(),
+                "Vanilla movement did not track the bucket packet rotation");
+        check(target.equals(world.emptiedAt), "Vanilla bucket used a position outside the schematic target");
+        check(player.getMainHandStack().isOf(Items.BUCKET), "Survival water bucket exchange was lost");
+        check(player.getYaw() == 90 && player.getPitch() == 0, "Bucket use turned the local camera");
+        check(client.crosshairTarget == originalCrosshair
+                && player.input.playerInput.equals(PlayerInput.DEFAULT), "Bucket use changed crosshair or input");
+        check(Printer.blockPosTimeout.stream().anyMatch(entry -> entry.pos.equals(target)), "Wrong target cooldown");
+        player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+        check(!item.send(client, player),
+                "Waterlogged twice while waiting for the authoritative block update");
+        check(fixture.network.uses.size() == 1, "Sent another bucket before server confirmation");
+        // Simulate an authoritative rejection so this dry position is eligible for the budget checks below.
+        Printer.confirmNativePlacement(target, world.getBlockState(target));
+    }
+
+    private static void checkSharedInteractionBudget(Fixture fixture, Action item, Action block,
+                                                    PlacementRateLimiter limiter, BlockPos target, BlockState dry) {
+        MinecraftClient client = fixture.client;
+        FixturePlayer player = fixture.player;
+        FixtureInteraction interaction = fixture.interaction;
+        check(block.send(client, player), "Block interaction did not share remaining item-use budget");
+        check(interaction.itemUses == 1 && interaction.blockUses == 1, "Interactions did not reach the captured manager");
+        check(!item.send(client, player), "Item use bypassed exhausted shared budget");
+        check(!block.send(client, player), "Block interaction bypassed exhausted shared budget");
+        check(interaction.itemUses == 1 && interaction.blockUses == 1 && player.swings == 2,
+                "Rejected budget still invoked interaction or swing");
+        player.age++;
+        check(!item.send(client, player), "Item use obtained a fresh rolling budget on tick change");
+        PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(3);
+        check(item.send(client, player), "Raising the configured budget did not allow the remaining item use");
+        check(!block.send(client, player), "Live limit change reset production usage");
+        check(interaction.itemUses == 2 && interaction.blockUses == 1, "Wrong number of production interactions");
+        Printer.confirmNativePlacement(target, dry);
+        player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+
+        limiter.reset();
+        PrinterConfig.NATIVE_BURST.setIntegerValue(1);
+        PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(9);
+        check(item.send(client, player), "First item use under one-per-tick burst denied");
+        check(!block.send(client, player), "Block interaction ignored item-use burst consumption");
+        player.age++;
+        check(block.send(client, player), "Next tick did not refresh the shared interaction burst");
+        Printer.confirmNativePlacement(target, dry);
+        player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+
+        limiter.reset();
+        PrinterConfig.NATIVE_BURST.setIntegerValue(9);
+        PrinterConfig.INTERACTION_WINDOW_LIMIT.setIntegerValue(1);
+        interaction.rejectItemUse = true;
+        int priorUses = interaction.itemUses;
+        check(!item.send(client, player), "Rejected item-use result was reported as successful");
+        check(interaction.itemUses == priorUses + 1, "Rejected attempt never reached interaction manager");
+        check(!block.send(client, player), "An attempted item use refunded its network budget after rejection");
+        check(player.getYaw() == 90 && player.getPitch() == 0, "Rejected bucket use turned the camera");
+        interaction.rejectItemUse = false;
+        interaction.throwOnUse = true;
+        limiter.reset();
+        try {
+            item.send(client, player);
+            throw new AssertionError("Missing test interaction failure");
+        } catch (IllegalStateException expected) {
+            check("test bucket failure".equals(expected.getMessage()), "Unexpected bucket failure");
+        }
+        check(player.getYaw() == 90 && player.getPitch() == 0, "Failed interaction leaked temporary aim");
+    }
+
+    private static void checkScaffoldingBucketSwitch(Fixture fixture, FixtureWorld world, FixtureSchematic schematic) {
+        BlockPos target = schematic.target;
+        FixturePlayer player = fixture.player;
+        BlockState scaffolding = Blocks.SCAFFOLDING.getDefaultState();
+        world.blocks.put(target, scaffolding);
+        world.blocks.put(target.south(), Blocks.STONE.getDefaultState());
+        schematic.desired = scaffolding.with(Properties.WATERLOGGED, true);
+        player.inventory.main.set(0, new ItemStack(Items.SCAFFOLDING));
+        player.inventory.main.set(2, new ItemStack(Items.WATER_BUCKET));
+        player.inventory.selectedSlot = 0;
+        Vec3d eye = player.getEyePos();
+        Vec3d end = eye.add(target.toCenterPos().subtract(eye).normalize().multiply(player.getBlockInteractionRange()));
+        check(world.raycast(new RaycastContext(eye, end, RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE, player)).getBlockPos().equals(target), "Held scaffolding is a full outline");
+        player.inventory.selectedSlot = 2;
+        check(world.raycast(new RaycastContext(eye, end, RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE, player)).getBlockPos().equals(target.south()), "Bucket ray must pass through the center");
+        player.inventory.selectedSlot = 0;
+        WaterLogGuide guide = new WaterLogGuide(new SchematicBlockState(world, schematic, target));
+        check(guide.canExecute(player), "Dry scaffolding with an accessible bucket was skipped");
+        int packets = fixture.network.uses.size();
+        world.emptiedAt = null;
+        check(guide.execute(player).getFirst().send(fixture.client, player), "Failed to waterlog scaffolding after selecting a bucket");
+        check(fixture.network.uses.size() == packets + 1 && target.equals(world.emptiedAt),
+                "Used the old scaffolding outline and aimed through its hollow center");
     }
 
     private static final class ProbeBlockAction extends InteractActionImpl {
@@ -271,23 +502,63 @@ public final class InteractionRegressionChecks {
         @Override public List<Action> execute(ClientPlayerEntity player) { return List.of(); }
     }
 
+    private static final class FixtureSchematic extends WorldSchematic {
+        private BlockPos target;
+        private BlockState desired;
+        private FixtureSchematic() { super(null, null, null, null); }
+        @Override public BlockState getBlockState(BlockPos pos) {
+            return pos.equals(target) ? desired : Blocks.AIR.getDefaultState();
+        }
+    }
+
+    private static final class FixtureWorld extends ClientWorld {
+        private Map<BlockPos, BlockState> blocks;
+        private BlockPos emptiedAt;
+        private WorldBorder border;
+        private DimensionType dimension;
+        private FixtureWorld() { super(null, null, null, null, 0, 0, null, false, 0L, 0); }
+        @Override public BlockState getBlockState(BlockPos pos) { return blocks.getOrDefault(pos, Blocks.AIR.getDefaultState()); }
+        @Override public FluidState getFluidState(BlockPos pos) { return getBlockState(pos).getFluidState(); }
+        @Override public boolean isClient() { return true; }
+        @Override public WorldBorder getWorldBorder() { return border; }
+        @Override public DimensionType getDimension() { return dimension; }
+        @Override public void playSound(PlayerEntity source, BlockPos pos, SoundEvent sound, SoundCategory cat, float volume, float pitch) {
+            emptiedAt = pos.toImmutable();
+        }
+    }
+
     private static final class FixturePlayer extends ClientPlayerEntity {
         private PlayerInventory inventory;
         private PlayerAbilities abilities;
         private ItemStack offhand;
         private boolean sneaking;
         private int swings;
+        private ItemCooldownManager cooldowns;
+        private double reach;
         private FixturePlayer() { super(null, null, null, null, null, false, false); }
         @Override public PlayerInventory getInventory() { return inventory; }
         @Override public PlayerAbilities getAbilities() { return abilities; }
         @Override public ItemStack getOffHandStack() { return offhand; }
         @Override public boolean isSneaking() { return sneaking; }
+        @Override public boolean isDescending() { return sneaking; }
+        @Override public double getBlockInteractionRange() { return reach; }
+        @Override public ItemStack getMainHandStack() { return inventory.main.get(inventory.selectedSlot); }
+        @Override public ItemStack getStackInHand(Hand hand) { return hand == Hand.MAIN_HAND ? getMainHandStack() : offhand; }
+        @Override public void setStackInHand(Hand hand, ItemStack stack) {
+            check(hand == Hand.MAIN_HAND, "Waterlogging changed the offhand");
+            inventory.main.set(inventory.selectedSlot, stack);
+        }
+        @Override public ItemCooldownManager getItemCooldownManager() { return cooldowns; }
         @Override public void swingHand(Hand hand) { swings++; }
     }
 
     private static final class FixtureNetwork extends ClientPlayNetworkHandler {
         private FixtureNetwork() { super(null, null, null); }
-        @Override public void sendPacket(Packet<?> packet) {}
+        @Override public net.minecraft.client.network.PlayerListEntry getPlayerListEntry(java.util.UUID uuid) { return null; }
+        private List<PlayerInteractItemC2SPacket> uses;
+        @Override public void sendPacket(Packet<?> packet) {
+            if (packet instanceof PlayerInteractItemC2SPacket use) uses.add(use);
+        }
     }
 
     private static final class FixtureInteraction extends ClientPlayerInteractionManager {
@@ -296,6 +567,7 @@ public final class InteractionRegressionChecks {
         private int itemUses;
         private int blockUses;
         private boolean rejectItemUse;
+        private boolean throwOnUse;
         private SlotActionType lastType;
         private FixtureInteraction() { super(null, null); }
         @Override public void clickSlot(int syncId, int slotId, int button, SlotActionType type, PlayerEntity player) {
@@ -309,7 +581,8 @@ public final class InteractionRegressionChecks {
         @Override public void clickCreativeStack(ItemStack stack, int slotId) { creativeWrites++; }
         @Override public ActionResult interactItem(PlayerEntity player, Hand hand) {
             itemUses++;
-            return rejectItemUse ? ActionResult.FAIL : ActionResult.SUCCESS;
+            if (throwOnUse) throw new IllegalStateException("test bucket failure");
+            return rejectItemUse ? ActionResult.FAIL : super.interactItem(player, hand);
         }
         @Override public ActionResult interactBlock(ClientPlayerEntity player, Hand hand, BlockHitResult hit) {
             blockUses++;

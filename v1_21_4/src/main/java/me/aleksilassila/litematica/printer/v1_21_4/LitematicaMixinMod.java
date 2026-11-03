@@ -7,7 +7,6 @@ import fi.dy.masa.malilib.config.IConfigBase;
 import fi.dy.masa.malilib.config.options.ConfigBoolean;
 import fi.dy.masa.malilib.config.options.ConfigDouble;
 import fi.dy.masa.malilib.config.options.ConfigHotkey;
-import fi.dy.masa.malilib.config.options.ConfigInteger;
 import fi.dy.masa.malilib.hotkeys.KeyCallbackToggleBooleanConfigWithMessage;
 import fi.dy.masa.malilib.hotkeys.KeybindSettings;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
@@ -23,7 +22,6 @@ public class LitematicaMixinMod implements ModInitializer {
     public static MovementHandler movementHandler = new MovementHandler();
     public static FreeLook freeLook = FreeLook.getInstance();
     // Config settings
-    public static final ConfigInteger PRINTING_INTERVAL = new ConfigInteger("printingInterval", 12, 1, 40, "Printing interval. Lower values mean faster printing speed.\nIf the printer creates \"ghost blocks\" or blocks are facing the wrong way, raise this value.");
     public static final ConfigDouble PRINTING_RANGE = new ConfigDouble("printingRange", 4.5, 2.5, 5, "Printing range. Default: 4.5 blocks, capped by the player's native interaction range.");
     //    public static final ConfigBoolean PRINT_WATER    = new ConfigBoolean("printWater",    false, "Whether the printer should place water\n source blocks or make blocks waterlogged.");
 //    public static final ConfigBoolean PRINT_IN_AIR = new ConfigBoolean("printInAir", true, "Whether or not the printer should place blocks without anything to build on.\nBe aware that some anti-cheat plugins might notice this.");
@@ -33,7 +31,6 @@ public class LitematicaMixinMod implements ModInitializer {
     public static ImmutableList<IConfigBase> getConfigList() {
         List<IConfigBase> list = new java.util.ArrayList<>(Configs.Generic.OPTIONS);
         list.add(PRINT_MODE);
-        list.add(PRINTING_INTERVAL);
         list.add(PRINTING_RANGE);
 //        list.add(PRINT_IN_AIR);
         list.add(REPLACE_FLUIDS_SOURCE_BLOCKS);

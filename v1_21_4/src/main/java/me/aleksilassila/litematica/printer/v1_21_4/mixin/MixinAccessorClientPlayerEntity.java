@@ -9,6 +9,9 @@ public interface MixinAccessorClientPlayerEntity {
     @Accessor("ticksLeftToDoubleTapSprint")
     void setTicksLeftToDoubleTapSprint(int ticksLeftToDoubleTapSprint);
 
+    @Accessor("lastSneaking")
+    boolean getLastSneaking();
+
     @Accessor("lastPitch")
     float getLastPitch();
     @Accessor("lastPitch")

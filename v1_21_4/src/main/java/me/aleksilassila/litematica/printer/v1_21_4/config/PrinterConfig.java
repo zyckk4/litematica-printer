@@ -63,10 +63,7 @@ public class PrinterConfig {
     public static final ConfigBoolean PRINTER_DISABLE_IN_GUIS = new ConfigBoolean("printerDisableInGuis", true, "Disable the printer in GUIs.");
     public static final ConfigBoolean PRINTER_AIRPLACE = new ConfigBoolean("printerAirPlace", false, "Place blocks in the air.");
     public static final ConfigBoolean PRINTER_AIRPLACE_ONLY = new ConfigBoolean("printerAirPlaceOnly", false, "Attempt to air place only when air place is enabled.");
-    public static final ConfigBoolean PRINTER_AIRPLACE_OFFHAND_SLOT_SUPPRESS = new ConfigBoolean("printerAirPlaceOffhandSlotSuppress", false, "Legacy compatibility key. Native 1.21.4 never suppresses authoritative off-hand updates.");
-    public static final ConfigBoolean PRINTER_SUPER_CHINESE_GHOST_ITEM_FIX = new ConfigBoolean("printerSuperChineseGhostItemFix", false, "Legacy compatibility key. Native 1.21.4 always accepts authoritative inventory corrections.");
     public static final ConfigDouble PRINTER_AIRPLACE_RANGE = new ConfigDouble("printerAirPlaceRange", 4.5, 0, 10, "Range for specialized airplace handlers. Default: 4.5 blocks; actual placement also obeys the player's interaction reach.");
-    public static final ConfigBoolean PRINTER_AIRPLACE_FLOATING_ONLY = new ConfigBoolean("printerAirPlaceFloatingOnly", false, "Only attempt to air place if the block position is surrounded by air.");
     public static final ConfigInteger PRINTER_MIN_INACTIVE_TIME_AIR_PLACE = new ConfigInteger("printerMinInactiveTimeAirPlace", 0, "Minimum time in ticks to wait before placing a block in the air.");
     public static final ConfigString PRINTER_HOTBAR_SLOTS = new ConfigString("printerHotbarSlots", "3,4,5,6,7,8,9", "Hotbar slots to use for the printer. Numbers from 1-9 separated by commas.");
     public static final ConfigBoolean AUTO_CONVERT_SCHEMATIC_TO_LITEMATIC_ON_LOAD = new ConfigBoolean("autoConvertSchematicToLitematicOnLoad", false, "Automatically convert schematic files to litematic files when loading them.");
@@ -111,10 +108,7 @@ public class PrinterConfig {
         list.add(PRINTER_DISABLE_IN_GUIS);
         list.add(PRINTER_AIRPLACE);
         list.add(PRINTER_AIRPLACE_ONLY);
-        list.add(PRINTER_AIRPLACE_OFFHAND_SLOT_SUPPRESS);
-        list.add(PRINTER_SUPER_CHINESE_GHOST_ITEM_FIX);
         list.add(PRINTER_AIRPLACE_RANGE);
-        list.add(PRINTER_AIRPLACE_FLOATING_ONLY);
         list.add(PRINTER_MIN_INACTIVE_TIME_AIR_PLACE);
         list.add(PRINTER_HOTBAR_SLOTS);
         list.add(AUTO_CONVERT_SCHEMATIC_TO_LITEMATIC_ON_LOAD);

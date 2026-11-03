@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $moduleDirectory = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($GradleUserHome)) { $GradleUserHome = Join-Path $env:USERPROFILE '.gradle' }
 if ([string]::IsNullOrWhiteSpace($JavaHome)) { throw 'Set JAVA_HOME or pass -JavaHome with a JDK 21 directory.' }
-if ([string]::IsNullOrWhiteSpace($PrinterJar)) { $PrinterJar = Join-Path $moduleDirectory 'build/libs/litematica-printer-3.4.3-mc1.21.4.jar' }
+if ([string]::IsNullOrWhiteSpace($PrinterJar)) { $PrinterJar = Join-Path $moduleDirectory 'build/libs/litematica-printer-3.4.4-mc1.21.4.jar' }
 
 function Cached-Jar([string]$Coordinate) {
     $pieces = $Coordinate.Split(':')
