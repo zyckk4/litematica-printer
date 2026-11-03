@@ -45,6 +45,7 @@ def public_path(relative):
 
 def zip_entry(archive, name, content, executable=False):
     info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    info.create_system = 3  # Store Unix permissions consistently on all build hosts.
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = (0o100755 if executable else 0o100644) << 16
     archive.writestr(info, content)
@@ -147,10 +148,11 @@ def main():
         shutil.copyfile(ROOT / "LICENSE.md", staging / "LICENSE.md")
         (staging / "BUILD.json").write_text(
             json.dumps({key: value for key, value in source_manifest.items()
-                        if key != "source_files_sha256"}, indent=2) + "\n", encoding="utf-8")
+                        if key != "source_files_sha256"}, indent=2) + "\n", encoding="utf-8", newline="\n")
         asset_names = [artifact.name for artifact in artifacts] + [source_zip.name, "LICENSE.md", "BUILD.json"]
         (staging / "SHA256SUMS.txt").write_text(
-            "".join(f"{sha256(staging / name)}  {name}\n" for name in asset_names), encoding="utf-8")
+            "".join(f"{sha256(staging / name)}  {name}\n" for name in asset_names),
+            encoding="utf-8", newline="\n")
         staging.rename(output)
     print(f"Local release assets: {output}")
     print(f"Source commit: {source_manifest['git_commit']} ({len(source_files)} public files)")
