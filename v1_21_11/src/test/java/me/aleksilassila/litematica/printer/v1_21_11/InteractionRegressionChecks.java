@@ -3,9 +3,13 @@ package me.aleksilassila.litematica.printer.v1_21_11;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import me.aleksilassila.litematica.printer.v1_21_11.actions.Action;
+import me.aleksilassila.litematica.printer.v1_21_11.actions.ActionChain;
 import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_11.guides.Guide;
+import me.aleksilassila.litematica.printer.v1_21_11.guides.Guides;
+import me.aleksilassila.litematica.printer.v1_21_11.guides.interaction.CampfireExtinguishGuide;
 import me.aleksilassila.litematica.printer.v1_21_11.guides.interaction.CycleStateGuide;
+import me.aleksilassila.litematica.printer.v1_21_11.guides.interaction.TillingGuide;
 import me.aleksilassila.litematica.printer.v1_21_11.guides.interaction.WaterLogGuide;
 import me.aleksilassila.litematica.printer.v1_21_11.guides.placement.SlabGuide;
 import me.aleksilassila.litematica.printer.v1_21_11.implementation.PrinterPlacementContext;
@@ -111,6 +115,21 @@ public final class InteractionRegressionChecks {
         BlockState note = Blocks.NOTE_BLOCK.getDefaultState();
         for (int pitch = 0; pitch <= 24; pitch++) {
             check(CycleStateGuide.needsInteraction(note, note.with(NoteBlock.NOTE, pitch)) == (pitch != 0), "Note comparison");
+        }
+        BlockState detector = Blocks.DAYLIGHT_DETECTOR.getDefaultState();
+        for (boolean currentMode : new boolean[]{false, true}) {
+            for (boolean targetMode : new boolean[]{false, true}) {
+                for (int currentPower = 0; currentPower <= 15; currentPower++) {
+                    for (int targetPower = 0; targetPower <= 15; targetPower++) {
+                        BlockState current = detector.with(DaylightDetectorBlock.INVERTED, currentMode)
+                                .with(DaylightDetectorBlock.POWER, currentPower);
+                        BlockState target = detector.with(DaylightDetectorBlock.INVERTED, targetMode)
+                                .with(DaylightDetectorBlock.POWER, targetPower);
+                        check(CycleStateGuide.needsInteraction(current, target) == (currentMode != targetMode),
+                                "Daylight detector tuning depends on ambient power or misses its mode");
+                    }
+                }
+            }
         }
         check(!CycleStateGuide.needsInteraction(lever, trapdoor), "Different block types would be interacted with");
         for (Direction gateFacing : Direction.Type.HORIZONTAL) {
@@ -299,6 +318,7 @@ public final class InteractionRegressionChecks {
             PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(false);
             checkScaffoldingBucketSwitch(fixture, world, schematic);
             checkMovingInteractions(fixture, world, schematic, limiter);
+            checkCopperTools(fixture, world, schematic, limiter);
         } finally {
             set(SchematicWorldHandler.class, SchematicWorldHandler.INSTANCE, "world", previousSchematic);
             inventoryClient.set(Printer.inventoryManager, previousInventoryClient);
@@ -536,6 +556,8 @@ public final class InteractionRegressionChecks {
             Printer.confirmNativePlacement(target, repeater.with(RepeaterBlock.DELAY, 2));
             check(!Printer.hasPendingPlacement(target), "Next dial step was not confirmed");
 
+            checkDaylightInteractions(fixture, world, schematic, limiter, printer);
+
             BlockState dry = Blocks.OAK_SLAB.getDefaultState();
             world.blocks.put(target, dry);
             schematic.desired = dry.with(Properties.WATERLOGGED, true);
@@ -588,6 +610,78 @@ public final class InteractionRegressionChecks {
             PrinterConfig.PRINTER_NATIVE_MOVING.setBooleanValue(nativeMoving);
             PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(nativeOmni);
             PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(stop);
+        }
+    }
+
+    private static void checkDaylightInteractions(Fixture fixture, FixtureWorld world, FixtureSchematic schematic,
+                                                  PlacementRateLimiter limiter, Printer printer) throws Exception {
+        var player = fixture.player;
+        BlockPos target = schematic.target;
+        for (boolean moving : new boolean[]{false, true}) {
+            PrinterConfig.PRINTER_NATIVE_MOVING.setBooleanValue(moving);
+            PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(moving);
+            set(Entity.class, player, "velocity", moving ? new Vec3d(0.16, 0, 0) : Vec3d.ZERO);
+            for (boolean initiallyInverted : new boolean[]{false, true}) {
+                limiter.reset();
+                BlockState before = Blocks.DAYLIGHT_DETECTOR.getDefaultState()
+                        .with(DaylightDetectorBlock.INVERTED, initiallyInverted).with(DaylightDetectorBlock.POWER, 15);
+                world.blocks.put(target, before);
+                schematic.desired = before.with(DaylightDetectorBlock.INVERTED, !initiallyInverted)
+                        .with(DaylightDetectorBlock.POWER, 0);
+                int packets = fixture.network.blockPackets.size();
+                check(schedule(printer), "Daylight detector mode was not scheduled, moving=" + moving);
+                check(fixture.network.blockPackets.size() == packets, "Detector toggled before its action was processed");
+                if (moving) printer.flushNativePlacements();
+                else printer.actionHandler.processCurrentTickActions();
+                check(fixture.network.blockPackets.size() == packets + 1 && Printer.hasPendingPlacement(target),
+                        "Detector toggle did not send exactly one pending interaction");
+                check(fixture.network.blockPackets.get(packets).getBlockHitResult().getBlockPos().equals(target),
+                        "Detector interaction targeted another block");
+                BlockState powerUpdate = before.with(DaylightDetectorBlock.POWER, 7);
+                world.blocks.put(target, powerUpdate);
+                Printer.confirmNativePlacement(target, powerUpdate);
+                check(Printer.hasPendingPlacement(target) && !printer.onGameTick(),
+                        "A daylight power update released the pending mode toggle");
+                BlockState confirmed = powerUpdate.with(DaylightDetectorBlock.INVERTED, !initiallyInverted);
+                world.blocks.put(target, confirmed);
+                Printer.confirmNativePlacement(target, confirmed);
+                check(!Printer.hasPendingPlacement(target), "Detector mode acknowledgement was not accepted");
+                SchematicBlockState completed = new SchematicBlockState(world, schematic, target);
+                check(!new CycleStateGuide(completed).canExecute(player)
+                                && MovingPrinterAction.prepare(completed, player, player.reach) == null,
+                        "Matched detector mode was clicked again because its power differed");
+            }
+        }
+        limiter.reset();
+    }
+
+    private static void checkCopperTools(Fixture fixture, FixtureWorld world, FixtureSchematic schematic,
+                                         PlacementRateLimiter limiter) {
+        var player = fixture.player;
+        BlockPos target = schematic.target;
+        BlockState[] existing = {Blocks.DIRT.getDefaultState(), Blocks.CAMPFIRE.getDefaultState()};
+        BlockState[] desired = {Blocks.FARMLAND.getDefaultState(), Blocks.CAMPFIRE.getDefaultState().with(CampfireBlock.LIT, false)};
+        var tools = new net.minecraft.item.Item[]{Items.COPPER_HOE, Items.COPPER_SHOVEL};
+        for (int i = 0; i < tools.length; i++) {
+            limiter.reset();
+            fill(player, ItemStack.EMPTY);
+            player.inventory.main.set(2, new ItemStack(tools[i]));
+            world.blocks.put(target, existing[i]);
+            schematic.desired = desired[i];
+            SchematicBlockState state = new SchematicBlockState(world, schematic, target);
+            Guide selected = java.util.Arrays.stream(new Guides().getInteractionGuides(state))
+                    .filter(guide -> guide instanceof TillingGuide || guide instanceof CampfireExtinguishGuide)
+                    .filter(guide -> guide.canExecute(player)).findFirst().orElse(null);
+            check(selected != null, "Registered guide rejected its only available copper tool: " + tools[i]);
+            int uses = fixture.interaction.blockUses;
+            for (Action action : selected.execute(player)) {
+                if (action instanceof ActionChain chain) {
+                    for (Action step : chain.getActionsCurrentTick()) check(step.send(fixture.client, player), "Copper tool action failed");
+                    for (Action step : chain.getActionsNextTick()) check(step.send(fixture.client, player), "Copper tool next-tick action failed");
+                } else check(action.send(fixture.client, player), "Copper tool action failed");
+            }
+            check(player.getMainHandStack().isOf(tools[i]) && fixture.interaction.blockUses == uses + 1,
+                    "Copper tool was not selected and used by its real guide");
         }
     }
 

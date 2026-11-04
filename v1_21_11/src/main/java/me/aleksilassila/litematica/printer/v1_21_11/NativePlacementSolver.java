@@ -14,6 +14,8 @@ import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
 import net.minecraft.state.property.Property;
 import net.minecraft.state.property.IntProperty;
+import net.minecraft.state.property.BooleanProperty;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -63,9 +65,10 @@ public final class NativePlacementSolver {
     private NativePlacementSolver() {
     }
 
-    /** The state achievable by the next single use; later uses follow server updates. */
+    /** The next placement goal; multiface goals are resolved to one face by the solver. */
     public static BlockState placementTarget(BlockView current, BlockView schematic, BlockPos target, BlockState desired) {
         BlockState existing = current.getBlockState(target);
+        if (existing.isReplaceable()) desired = PlacementStages.initialTarget(desired);
         IntProperty count = stackCount(desired);
         if (count != null) {
             int placed = existing.isOf(desired.getBlock()) ? existing.get(count) : 0;
@@ -103,6 +106,9 @@ public final class NativePlacementSolver {
         if (state.getBlock() instanceof SnowBlock) return SnowBlock.LAYERS;
         if (state.getBlock() instanceof CandleBlock) return CandleBlock.CANDLES;
         if (state.getBlock() instanceof SeaPickleBlock) return SeaPickleBlock.PICKLES;
+        if (state.getBlock() instanceof TurtleEggBlock) return TurtleEggBlock.EGGS;
+        if (state.getBlock() instanceof FlowerbedBlock) return FlowerbedBlock.FLOWER_AMOUNT;
+        if (state.getBlock() instanceof LeafLitterBlock) return Properties.SEGMENT_AMOUNT;
         return null;
     }
 
@@ -110,6 +116,38 @@ public final class NativePlacementSolver {
         if (!current.isOf(desired.getBlock())) return false;
         IntProperty count = stackCount(desired);
         return count != null && current.get(count) < desired.get(count);
+    }
+
+    public static boolean canAddFaces(BlockState current, BlockState desired) {
+        if (!(desired.getBlock() instanceof MultifaceBlock) || !current.isOf(desired.getBlock())) return false;
+        boolean missing = false;
+        for (Direction direction : Direction.values()) {
+            BooleanProperty face = MultifaceBlock.getProperty(direction);
+            if (!desired.contains(face)) continue;
+            // Repairing/removing an incorrect existing attachment is outside
+            // placement. Only extend an exact subset of the schematic faces.
+            if (current.get(face) && !desired.get(face)) return false;
+            missing |= desired.get(face) && !current.get(face);
+        }
+        return missing;
+    }
+
+    /** Allow one new planned face, chosen from the hits that are reachable now. */
+    public static boolean matchesNextPlacement(BlockView current, BlockPos target, BlockState desired, BlockState predicted) {
+        if (!(desired.getBlock() instanceof MultifaceBlock)) return statesMatch(desired, predicted);
+        if (predicted == null || !predicted.isOf(desired.getBlock())) return false;
+        BlockState before = current.getBlockState(target);
+        boolean sameBlock = before.isOf(desired.getBlock());
+        int added = 0;
+        for (Direction direction : Direction.values()) {
+            BooleanProperty face = MultifaceBlock.getProperty(direction);
+            if (!desired.contains(face)) continue;
+            boolean existing = sameBlock && before.get(face);
+            if (existing && !predicted.get(face)) return false;
+            if (predicted.get(face) && !desired.get(face)) return false;
+            if (predicted.get(face) && !existing) added++;
+        }
+        return added == 1;
     }
 
     /** Ordinary blocks use no rotation; directional blocks use a movement-safe lattice. */
@@ -222,10 +260,11 @@ public final class NativePlacementSolver {
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         for (HitCandidate candidate : hits) {
             BlockState predicted = simulate(target, stack, candidate.hit(), player.getYaw(), player.getPitch());
-            if (!statesMatch(desired, predicted)) continue;
+            if (!matchesNextPlacement(MinecraftClient.getInstance().world, target, desired, predicted)) continue;
+            BlockState stableTarget = desired.getBlock() instanceof MultifaceBlock ? predicted : desired;
             boolean stable = true;
             for (float[] rotation : OMNI_ROTATIONS) {
-                if (!statesMatch(desired, simulate(target, stack, candidate.hit(), rotation[0], rotation[1]))) {
+                if (!statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation[0], rotation[1]))) {
                     stable = false;
                     break;
                 }
@@ -247,10 +286,11 @@ public final class NativePlacementSolver {
         for (HitCandidate candidate : hits) {
             for (Rotation rotation : rotations) {
                 BlockState result = simulate(target, stack, candidate.hit(), rotation.yaw(), rotation.pitch());
-                if (!statesMatch(desired, result)) continue;
+                if (!matchesNextPlacement(MinecraftClient.getInstance().world, target, desired, result)) continue;
+                BlockState stableTarget = desired.getBlock() instanceof MultifaceBlock ? result : desired;
                 // Avoid nearest-direction boundaries while the player is moving.
-                if (!statesMatch(desired, simulate(target, stack, candidate.hit(), rotation.yaw() - 1.0F, rotation.pitch()))
-                        || !statesMatch(desired, simulate(target, stack, candidate.hit(), rotation.yaw() + 1.0F, rotation.pitch()))) continue;
+                if (!statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation.yaw() - 1.0F, rotation.pitch()))
+                        || !statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation.yaw() + 1.0F, rotation.pitch()))) continue;
                 return new Solution(candidate.hit(), result, rotation.yaw(), rotation.pitch(),
                         rotation.step(), candidate.airPlace(), false);
             }
@@ -267,7 +307,8 @@ public final class NativePlacementSolver {
         if (canClick(mc.world.getBlockState(hit.getBlockPos()))
                 && validHit(mc.player.getEyePos(), hit, effectiveReach(reach))) {
             BlockState predicted = simulate(target, stack, hit, yaw, pitch);
-            if (statesMatch(desired, predicted)) {
+            if (matchesNextPlacement(mc.world, target, desired, predicted)
+                    && (!(desired.getBlock() instanceof MultifaceBlock) || statesMatch(desired, predicted))) {
                 return new Solution(hit, predicted, yaw, pitch, solution.yawStep(), solution.airPlace(), solution.anyRotation());
             }
         }
@@ -276,6 +317,7 @@ public final class NativePlacementSolver {
         // Reusing the old point alone needlessly dropped a whole moving batch.
         Solution refreshed = solveRotations(target, desired, stack,
                 candidates(target, desired, reach, solution.airPlace(), true), List.of(new Rotation(yaw, pitch, solution.yawStep())));
+        if (refreshed != null && desired.getBlock() instanceof MultifaceBlock && !statesMatch(desired, refreshed.predicted())) return null;
         return refreshed == null ? null : new Solution(refreshed.hit(), refreshed.predicted(), yaw, pitch,
                 solution.yawStep(), refreshed.airPlace(), solution.anyRotation());
     }
@@ -304,6 +346,22 @@ public final class NativePlacementSolver {
         // Target-position interaction is the native airplace path. A local
         // inside=true flag is unnecessary and would differ from the wire hit.
         BlockState targetState = mc.world.getBlockState(target);
+        if (canAddFaces(targetState, desired)) {
+            for (Direction face : Direction.values()) addFace(result, eye, target, face, false, reach);
+            // Clicking a missing face's support makes vanilla prioritize that
+            // attachment independently of look. This also serves the legacy
+            // rotation-independent top-up guide.
+            for (Direction direction : Direction.values()) {
+                BooleanProperty face = MultifaceBlock.getProperty(direction);
+                if (!desired.contains(face) || !desired.get(face) || targetState.get(face)) continue;
+                BlockPos support = target.offset(direction);
+                BlockState supportState = mc.world.getBlockState(support);
+                if (!supportState.isReplaceable() && canClick(supportState)) {
+                    addFace(result, eye, support, direction.getOpposite(), false, reach);
+                }
+            }
+            return result;
+        }
         if (canAddToStack(targetState, desired)) {
             // Click the actual outline of the stack. Snow in particular requires its upper face.
             for (var box : targetState.getOutlineShape(mc.world, target).getBoundingBoxes()) {
@@ -426,11 +484,49 @@ public final class NativePlacementSolver {
         };
     }
 
+    /** Properties that cannot be required of the first ordinary item placement.
+     * These are block-specific: geometry and unrecoverable natural flags stay strict.
+     * Ignoring content here permits the empty shell, not automatic content restoration. */
+    public static boolean isDeferredProperty(BlockState state, Property<?> property) {
+        Block block = state.getBlock();
+        String name = property.getName();
+        if (block instanceof DaylightDetectorBlock) return property == DaylightDetectorBlock.INVERTED;
+        if (block instanceof EndPortalFrameBlock) return property == EndPortalFrameBlock.EYE;
+        if (block instanceof PointedDripstoneBlock) return property == PointedDripstoneBlock.THICKNESS;
+        if (block instanceof BambooBlock) return property == BambooBlock.LEAVES;
+        if (block instanceof ShelfBlock) return property == ShelfBlock.SIDE_CHAIN;
+        if (block instanceof LecternBlock) return property == LecternBlock.HAS_BOOK;
+        if (block instanceof ChiseledBookshelfBlock) return name.startsWith("slot_") && name.endsWith("_occupied");
+        if (block instanceof BrewingStandBlock) return name.startsWith("has_bottle_");
+        if (block instanceof JukeboxBlock) return property == JukeboxBlock.HAS_RECORD;
+        if (block instanceof BeehiveBlock) return property == BeehiveBlock.HONEY_LEVEL;
+        if (block instanceof ComposterBlock) return property == ComposterBlock.LEVEL;
+        if (block instanceof RespawnAnchorBlock) return property == RespawnAnchorBlock.CHARGES;
+        if (block instanceof CakeBlock) return property == CakeBlock.BITES;
+        if (block instanceof DriedGhastBlock) return name.equals("hydration");
+        if (block instanceof SculkSensorBlock) return name.equals("sculk_sensor_phase");
+        if (block instanceof SculkCatalystBlock) return name.equals("bloom");
+        if (block instanceof SculkShriekerBlock) return name.equals("shrieking");
+        if (block instanceof CrafterBlock) return name.equals("crafting");
+        if (block instanceof CaveVines) return property == CaveVines.BERRIES;
+        if (block instanceof BigDripleafBlock) return property == Properties.TILT;
+        if (block instanceof TurtleEggBlock) return property == TurtleEggBlock.HATCH;
+        return false;
+    }
+
     public static boolean statesMatch(BlockState desired, BlockState actual) {
-        if (desired == null || actual == null || desired.getBlock() != actual.getBlock()) return false;
+        if (desired == null || actual == null) return false;
+        // Planting bamboo starts as a shoot; subsequent growth/upper placement
+        // changes it into bamboo. Never generalize this to arbitrary block types.
+        if (desired.isOf(Blocks.BAMBOO) && actual.isOf(Blocks.BAMBOO_SAPLING)) return true;
+        // Vine tips become body segments as the next segment is added. Both
+        // are the same plant/material, and vanilla decides from its neighbors.
+        if (desired.getBlock() != actual.getBlock()
+                && !(desired.getBlock() instanceof CaveVines && actual.getBlock() instanceof CaveVines)) return false;
         for (Property<?> property : desired.getProperties()) {
             String name = property.getName();
             if (ENVIRONMENT_PROPERTIES.contains(name)) continue;
+            if (isDeferredProperty(desired, property)) continue;
             // Placement establishes geometry first; the interaction guide
             // subsequently applies these mutable states after server updates.
             if (name.equals("open") && (desired.getBlock() instanceof DoorBlock

@@ -45,8 +45,9 @@ public class Guides {
         registerGuide(CycleStateGuide.class,
                 DoorBlock.class, FenceGateBlock.class, TrapdoorBlock.class,
                 LeverBlock.class,
-                RepeaterBlock.class, ComparatorBlock.class, NoteBlock.class);
-        registerGuide(BlockReplacementGuide.class, SnowBlock.class, SeaPickleBlock.class, CandleBlock.class, SlabBlock.class);
+                RepeaterBlock.class, ComparatorBlock.class, NoteBlock.class, DaylightDetectorBlock.class);
+        registerGuide(BlockReplacementGuide.class, SnowBlock.class, SeaPickleBlock.class, CandleBlock.class, SlabBlock.class,
+                TurtleEggBlock.class, FlowerbedBlock.class, LeafLitterBlock.class, MultifaceBlock.class);
         registerGuide(WaterLogGuide.class);
         registerGuide(LogStrippingGuide.class);
     }

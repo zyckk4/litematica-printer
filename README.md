@@ -17,7 +17,7 @@ the earlier implementation is maintained separately on `1.21.4`.
 - Replenish materials from the inventory and track placement results from server
   block updates.
 - Adjust supported block states, including repeater delay, comparator mode,
-  note-block pitch and interactable open/powered states.
+  note-block pitch, daylight-detector inversion and interactable open/powered states.
 - Share a configurable rolling budget for block and item interactions, defaulting
   to 9 interactions per 310 ms and up to 9 interactions per tick.
 
@@ -87,8 +87,8 @@ budget. Lower the burst or increase the window if interactions are rejected.
 ## Placement limits
 
 With `printerNativeMoving` enabled, ordinary placements take priority. While moving,
-the printer can also lay supported rails, adjust repeaters, comparators and note
-blocks, and waterlog eligible targets. Leave an empty inventory slot for tuning
+the printer can also lay supported rails, adjust repeaters, comparators, note
+blocks and daylight detectors, and waterlog eligible targets. Leave an empty inventory slot for tuning
 and release sneak for tuning and bucket use. Rail connections depend on the
 support and neighboring tracks already in the world. Stand still for other
 specialized guides and precise sign rotations. Adjacent independent single
@@ -99,6 +99,22 @@ placement position. Flowing water and lava remain eligible for replacement.
 With `stripLogs` enabled, the printer prefers the finished material. When only
 the corresponding plain log and an axe are available, it places the log on the
 schematic axis and strips it once placed.
+
+Daylight detectors are placed before their inversion mode is adjusted. Output
+power follows the actual light and does not block printing. Mode changes wait
+for server confirmation, including while standing still.
+
+Turtle eggs, pink petals, wildflowers and leaf litter are added one item at a
+time; glow lichen, sculk veins and resin clumps are added one supported face at
+a time. Bamboo may start as a shoot, and dripstone thickness and shelf connections
+settle after placement. Their support and growth rules still apply.
+
+Farmland and potted plants start with dirt and an empty flower pot, followed by
+the existing stationary tilling/filling guides. Filled cauldrons and candle cakes
+start with an empty cauldron and a plain cake. Content and transient states no
+longer prevent placing supported block shells, but this does not restore their
+contents: the remaining manual steps are listed below. Copper hoes and shovels
+are accepted by the tilling and campfire-extinguishing guides.
 
 Incorrect blocks and orientations are not automatically excavated and replaced.
 Redstone-controlled states follow the surrounding circuit. Sign text is filled
@@ -113,12 +129,21 @@ optimization target does not guarantee compatibility with every server setup.
 | Area | Trigger and observed code behavior |
 | --- | --- |
 | Native solver | With `printerNativeMoving` enabled and both `printerNativeOmni` and `printerGrimRotate` disabled, ordinary blocks can be skipped even with solid support. |
-| Tools | The tilling and campfire guides omit copper hoes and shovels from their tool lists. |
+| Content and transformations | The printer can start with the empty/basic block, but does not insert books, bottles or records; fill cauldrons; add candles to cakes; charge respawn anchors; fill composters; or recreate cake bites and honey levels. Restore these separately. Bamboo growth, berries and hydration also follow normal game rules. |
+| Existing light state | An extinguished campfire is not automatically relit, and a lit candle is not automatically extinguished. The opposite operations are supported while stationary. |
+| Vine attachments | Ordinary vines can accept a different supported face from the schematic and do not repair existing faces. Multiface blocks use the separate staged-face path. |
+| Strict raycast and slabs | With both `printerRaycast` and `printerRaycastStrictBlockHit` enabled, completing a bottom slab from directly above can fail because hit samples use full-block faces. |
 | Keys and camera | Default `printerPickBlock` can consume middle click on a miss. In legacy mode FreeLook can stay active after printing stops. |
 | Airplace and state matching | The legacy airplace switch, range, airplace-only mode and inactivity delay do not govern native omni placement. Legacy airplace can reuse a cached context with `printerNoPlacementCache` enabled. The explicit `printerAllowNoneExactStates` check is limited to the legacy glow lichen guide. |
 | Inventory | `printerHotbarSlots` limits refill destinations. Existing materials in excluded slots can still be selected. A survival refill takes at least one tick even with zero inventory delay. Native material matching can skip a usable renamed block. |
 | Signs | Manually editing a sign at a schematic sign position while printing can submit schematic text and close the editor. |
 | Settings screen | Building the combined configuration list adds Litematica's Generic options twice. |
+
+Standalone water/lava source placement and arbitrary block-entity inventories/NBT
+are not supported. Natural-only flags such as a shrieker's `can_summon` or a
+creaking heart's `natural` remain strict; ordinary placement cannot recreate
+them. Transient redstone/sculk/animation states are not kept frozen to the
+schematic. These limits are separate from successfully placing the base block.
 
 ## Build and verification
 

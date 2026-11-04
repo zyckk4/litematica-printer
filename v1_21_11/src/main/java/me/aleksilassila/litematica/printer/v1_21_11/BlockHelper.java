@@ -31,6 +31,7 @@ abstract public class BlockHelper {
             Items.DIAMOND_SHOVEL,
             Items.GOLDEN_SHOVEL,
             Items.IRON_SHOVEL,
+            Items.COPPER_SHOVEL,
             Items.STONE_SHOVEL,
             Items.WOODEN_SHOVEL
     };

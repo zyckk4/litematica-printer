@@ -17,6 +17,7 @@ public class TillingGuide extends InteractionGuide {
             Items.DIAMOND_HOE,
             Items.GOLDEN_HOE,
             Items.IRON_HOE,
+            Items.COPPER_HOE,
             Items.STONE_HOE,
             Items.WOODEN_HOE
     };
