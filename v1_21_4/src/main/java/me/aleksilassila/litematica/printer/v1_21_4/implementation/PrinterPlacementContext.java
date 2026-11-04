@@ -1,7 +1,9 @@
 package me.aleksilassila.litematica.printer.v1_21_4.implementation;
 
 import me.aleksilassila.litematica.printer.v1_21_4.BlockHelper;
+import me.aleksilassila.litematica.printer.v1_21_4.TorchPlacement;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
+import me.aleksilassila.litematica.printer.v1_21_4.mixin.MixinAccessorClientPlayerEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.FireBlock;
 import net.minecraft.entity.player.PlayerEntity;
@@ -21,6 +23,7 @@ public class PrinterPlacementContext extends ItemPlacementContext {
     public boolean canStealth = false;
     public boolean isRaytrace = false;
     public boolean isAirPlace = false;
+    private @Nullable BlockState requiredTorchState;
 
     public PrinterPlacementContext(PlayerEntity player, BlockHitResult hitResult, ItemStack requiredItem, int requiredItemSlot) {
         this(player, hitResult, requiredItem, requiredItemSlot, null, false);
@@ -74,7 +77,43 @@ public class PrinterPlacementContext extends ItemPlacementContext {
                 || !ItemStack.areItemsAndComponentsEqual(stack, getStack())) return false;
         ItemPlacementContext live = item.getPlacementContext(new ItemPlacementContext(player, hand, stack, wire));
         return live != null && live.getBlockPos().equals(getBlockPos())
-                && BlockHelper.canReplaceFluid(live.getWorld().getBlockState(live.getBlockPos()));
+                && BlockHelper.canReplaceFluid(live.getWorld().getBlockState(live.getBlockPos()))
+                && (!requiresExactTorchState() || getValidatedTorchPlacementState(player, hand, wire) != null);
+    }
+
+    public boolean requiresExactTorchState() {
+        return requiredTorchState != null;
+    }
+
+    /** Match the angle PrepareLook will send, including vanilla's full direction order. */
+    public @Nullable BlockState predictTorchPlacement(BlockState desired) {
+        requiredTorchState = desired;
+        PlayerEntity player = getPlayer();
+        if (player == null) return null;
+        float yaw = player.getYaw();
+        float pitch = player.getPitch();
+        if (isAirPlace && lookDirection != null) {
+            yaw = switch (lookDirection) {
+                case NORTH -> 180.0F;
+                case WEST -> 90.0F;
+                case EAST -> -90.0F;
+                default -> 0.0F;
+            };
+            pitch = lookDirection == Direction.UP ? -90.0F : lookDirection == Direction.DOWN ? 90.0F : 0.0F;
+        }
+        BlockHitResult wire = isAirPlace
+                ? new BlockHitResult(hitResult.getPos(), hitResult.getSide(), getBlockPos(), false) : hitResult;
+        BlockState result = TorchPlacement.predict(player, getHand(), getStack(), wire, getBlockPos(), yaw, pitch);
+        return TorchPlacement.matches(desired, result) ? result : null;
+    }
+
+    /** Recheck the actual sent angle and live supports immediately before UseOn. */
+    public @Nullable BlockState getValidatedTorchPlacementState(PlayerEntity player, Hand hand, BlockHitResult wire) {
+        if (requiredTorchState == null) return null;
+        if (!(player instanceof MixinAccessorClientPlayerEntity sent)) return null;
+        BlockState result = TorchPlacement.predict(player, hand, player.getStackInHand(hand), wire,
+                getBlockPos(), sent.getLastYaw(), sent.getLastPitch());
+        return TorchPlacement.matches(requiredTorchState, result) ? result : null;
     }
 
     @Override

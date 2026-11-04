@@ -5,7 +5,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 connecting directly to 2b2t, with native placement and movement handling. No
 client-side Via mod is required.
 
-Version: **3.4.5**. The `1.21.4` branch ports the native printer logic from the
+Version: **3.4.6**. The `1.21.4` branch ports the native printer logic from the
 `1.21.11` branch, preserving its placement, movement and interaction behavior for
 blocks supported by Minecraft 1.21.4. The earlier 1.21.4 implementation remains
 available in Git history; the `1.21.11` branch targets the newer client separately.
@@ -17,6 +17,8 @@ available in Git history; the `1.21.11` branch targets the newer client separate
 - Place throughout the configured range using native airplace and placement
   simulation, with support and collision checks.
 - Handle directional blocks, attachments, staged double chests and double slabs.
+- Preserve each torch's floor or wall attachment, including with rotation ignored;
+  recheck the actual torch item, sent angle and support before placement.
 - Replenish materials from the inventory and track placement results from server
   block updates.
 - Adjust supported block states, including repeater delay, comparator mode,
@@ -34,7 +36,7 @@ Requirements:
 - [MaLiLib 0.23.5](https://modrinth.com/mod/malilib/version/ifi4uRpL).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.5-mc1.21.4.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.6-mc1.21.4.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -125,7 +127,7 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.5
+## Remaining issues in 3.4.6
 
 | Area | Trigger and observed code behavior |
 | --- | --- |

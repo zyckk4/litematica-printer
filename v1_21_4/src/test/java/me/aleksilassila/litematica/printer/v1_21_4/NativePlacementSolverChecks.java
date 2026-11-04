@@ -87,6 +87,8 @@ public final class NativePlacementSolverChecks {
             checkFaceAndHalfFamilies(fixture);
             checkOtherDirectionalFamilies(fixture);
             checkTorchAttachments(fixture);
+            fixture.configure(Blocks.TORCH, 23, -51, Motion.STILL);
+            assertions += TorchPlacementChecks.run(fixture.client, fixture.world.blocks, fixture.unsafe);
             checkChestStages(fixture);
             checkSlabStages(fixture);
             fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);

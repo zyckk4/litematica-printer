@@ -1,6 +1,7 @@
 package me.aleksilassila.litematica.printer.v1_21_4.guides.placement;
 
 import me.aleksilassila.litematica.printer.v1_21_4.SchematicBlockState;
+import me.aleksilassila.litematica.printer.v1_21_4.TorchPlacement;
 import me.aleksilassila.litematica.printer.v1_21_4.actions.*;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.Guide;
@@ -11,7 +12,6 @@ import net.minecraft.block.*;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.BlockItem;
-import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.function.BooleanBiFunction;
@@ -65,6 +65,12 @@ abstract public class PlacementGuide extends Guide {
     @Nullable
     abstract public PrinterPlacementContext getPlacementContext(ClientPlayerEntity player);
 
+    @Nullable
+    protected BlockState getPlacementState(ClientPlayerEntity player, PrinterPlacementContext context) {
+        if (TorchPlacement.isTorch(targetState)) return context.predictTorchPlacement(targetState);
+        return getRequiredItemAsBlock(player).orElse(targetState.getBlock()).getPlacementState(context);
+    }
+
     @Override
     public boolean canExecute(ClientPlayerEntity player) {
         if (!super.canExecute(player)) return false;
@@ -77,12 +83,10 @@ abstract public class PlacementGuide extends Guide {
         if (requiredItems.isEmpty() || requiredItems.stream().allMatch(i -> i.isOf(Items.AIR)))
             return false;
 
-        ItemPlacementContext ctx = getPlacementContext(player);
+        PrinterPlacementContext ctx = getPlacementContext(player);
         if (ctx == null || !ctx.canPlace()) return false;
 
-        BlockState resultState = getRequiredItemAsBlock(player)
-                .orElse(targetState.getBlock())
-                .getPlacementState(ctx);
+        BlockState resultState = getPlacementState(player, ctx);
 
         if (resultState != null) {
             if (collidesWithPlayer(resultState)) {
