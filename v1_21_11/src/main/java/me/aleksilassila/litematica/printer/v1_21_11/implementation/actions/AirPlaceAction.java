@@ -37,7 +37,9 @@ public class AirPlaceAction extends InteractAction {
         }
         BlockHitResult wire = new BlockHitResult(hit.getPos(), hit.getSide(), target, false);
         if (!context.canSendPlacement(player, Hand.MAIN_HAND, wire)) return ActionResult.FAIL;
-        var predicted = item.getPlacementState(context);
+        var predicted = context.requiresExactTorchState()
+                ? context.getValidatedTorchPlacementState(player, Hand.MAIN_HAND, wire)
+                : item.getPlacementState(context);
         if (predicted == null || !Printer.tryAcquirePlacementPacket()) return ActionResult.FAIL;
         boolean swap = PrinterConfig.PRINTER_NATIVE_GRIM_AIRPLACE.getBooleanValue();
         Hand hand = swap ? Hand.OFF_HAND : Hand.MAIN_HAND;

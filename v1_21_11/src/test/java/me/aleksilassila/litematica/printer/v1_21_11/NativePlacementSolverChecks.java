@@ -90,6 +90,8 @@ public final class NativePlacementSolverChecks {
             checkFaceAndHalfFamilies(fixture);
             checkOtherDirectionalFamilies(fixture);
             checkTorchAttachments(fixture);
+            fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
+            assertions += TorchPlacementChecks.run(fixture.client, fixture.world.blocks, fixture.unsafe);
             checkChestStages(fixture);
             checkSlabStages(fixture);
             fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
@@ -957,6 +959,9 @@ public final class NativePlacementSolverChecks {
         private FixturePlayer() { super(null, null, null, null, null, PlayerInput.DEFAULT, false); }
         @Override public double getBlockInteractionRange() { return 4.5; }
         @Override public ItemStack getMainHandStack() { return heldStack; }
+        @Override public ItemStack getStackInHand(net.minecraft.util.Hand hand) {
+            return hand == net.minecraft.util.Hand.MAIN_HAND ? heldStack : ItemStack.EMPTY;
+        }
         @Override public boolean isDescending() { return sneaking; }
         @Override public boolean isSneaking() { return sneaking; }
         @Override public boolean isAlive() { return true; }

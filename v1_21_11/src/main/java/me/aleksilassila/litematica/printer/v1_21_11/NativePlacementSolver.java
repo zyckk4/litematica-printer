@@ -516,6 +516,7 @@ public final class NativePlacementSolver {
 
     public static boolean statesMatch(BlockState desired, BlockState actual) {
         if (desired == null || actual == null) return false;
+        if (TorchPlacement.isTorch(desired)) return TorchPlacement.matches(desired, actual);
         // Planting bamboo starts as a shoot; subsequent growth/upper placement
         // changes it into bamboo. Never generalize this to arbitrary block types.
         if (desired.isOf(Blocks.BAMBOO) && actual.isOf(Blocks.BAMBOO_SAPLING)) return true;

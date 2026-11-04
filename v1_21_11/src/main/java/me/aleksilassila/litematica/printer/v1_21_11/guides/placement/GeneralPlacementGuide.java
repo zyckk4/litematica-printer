@@ -7,6 +7,7 @@ import me.aleksilassila.litematica.printer.v1_21_11.NativePlacementSolver;
 import me.aleksilassila.litematica.printer.v1_21_11.PlacementStages;
 import me.aleksilassila.litematica.printer.v1_21_11.Printer;
 import me.aleksilassila.litematica.printer.v1_21_11.SchematicBlockState;
+import me.aleksilassila.litematica.printer.v1_21_11.TorchPlacement;
 import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_11.implementation.PrinterPlacementContext;
 import net.minecraft.block.*;
@@ -103,6 +104,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
     }
 
     protected List<Direction> getPossibleSides() {
+        if (TorchPlacement.isTorch(targetState)) return List.of(TorchPlacement.supportDirection(targetState));
         return Arrays.asList(Direction.values());
     }
 
@@ -289,9 +291,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
                         PrinterPlacementContext rayTraceContext = new PrinterPlacementContext(player, hitResult, requiredItem, slot, relativeDirection, requiresShift);
                         rayTraceContext.canStealth = true;
                         rayTraceContext.isRaytrace = true;
-                        BlockState resultState = getRequiredItemAsBlock(player)
-                                .orElse(targetState.getBlock())
-                                .getPlacementState(rayTraceContext);
+                        BlockState resultState = getPlacementState(player, rayTraceContext);
 
                         if (resultState != null && correctObserverPlacement(targetState, resultState) && (matchesPlacement(resultState, player) || correctChestPlacement(targetState, resultState))) {
                             contextCache = rayTraceContext;
@@ -303,9 +303,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
                     BlockHitResult hitResult = new BlockHitResult(blockHit, side.getOpposite(), neighborPos, false);
                     PrinterPlacementContext context = new PrinterPlacementContext(player, hitResult, requiredItem, slot, relativeDirection, requiresShift);
                     context.canStealth = true;
-                    BlockState result = getRequiredItemAsBlock(player)
-                            .orElse(targetState.getBlock())
-                            .getPlacementState(context); // FIXME torch shift clicks another torch and getPlacementState is the clicked block, which is true
+                    BlockState result = getPlacementState(player, context);
 
                     if (result != null && correctObserverPlacement(targetState, result) && (matchesPlacement(result, player) || correctChestPlacement(targetState, result))) {
                         contextCache = context;
@@ -356,7 +354,8 @@ public class GeneralPlacementGuide extends PlacementGuide {
         {
             BlockHitResult hr = new BlockHitResult(Vec3d.ofCenter(state.blockPos), Direction.UP, state.blockPos, true);
             PrinterPlacementContext quick = new PrinterPlacementContext(player, hr, requiredItem, slot, null, false);
-            BlockState res = getRequiredItemAsBlock(player).orElse(targetState.getBlock()).getPlacementState(quick);
+            quick.isAirPlace = true;
+            BlockState res = getPlacementState(player, quick);
             if (res != null && correctObserverPlacement(targetState, res) && matchesPlacement(res, player)) {
                 contextCache = quick;
                 quick.isAirPlace = true;
@@ -390,9 +389,8 @@ public class GeneralPlacementGuide extends PlacementGuide {
 
                             BlockHitResult hitResult = new BlockHitResult(hitVec, side.getOpposite(), state.blockPos, true);
                             PrinterPlacementContext context = new PrinterPlacementContext(player, hitResult, requiredItem, slot, lookDirection, false);
-                            BlockState result = getRequiredItemAsBlock(player)
-                                    .orElse(targetState.getBlock())
-                                    .getPlacementState(context);
+                            context.isAirPlace = true;
+                            BlockState result = getPlacementState(player, context);
                             if (result != null && correctObserverPlacement(targetState, result) && matchesPlacement(result, player)) {
                                 contextCache = context;
                                 context.isAirPlace = true;

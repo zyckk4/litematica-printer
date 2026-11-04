@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.5**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.6**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -31,7 +31,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.5-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.6-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -117,6 +117,10 @@ contents: the remaining manual steps are listed below. Copper hoes and shovels
 are accepted by the tilling and campfire-extinguishing guides.
 
 Incorrect blocks and orientations are not automatically excavated and replaced.
+Torches, soul torches and redstone torches preserve the schematic's floor or
+wall attachment, including when `printerIgnoreRotation` is enabled. Both native
+and legacy placement simulate the actual torch item and recheck the required
+support before sending; remove previously misplaced torches manually to reprint.
 Redstone-controlled states follow the surrounding circuit. Sign text is filled
 when an editing screen opens; existing text, back-face text, dye, glow and wax
 are not automatically repaired.
@@ -124,7 +128,7 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.5
+## Remaining issues in 3.4.6
 
 | Area | Trigger and observed code behavior |
 | --- | --- |
