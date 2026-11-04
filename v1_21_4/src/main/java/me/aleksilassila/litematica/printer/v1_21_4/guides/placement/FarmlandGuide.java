@@ -2,7 +2,9 @@ package me.aleksilassila.litematica.printer.v1_21_4.guides.placement;
 
 import me.aleksilassila.litematica.printer.v1_21_4.SchematicBlockState;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.ItemStack;
 import org.jetbrains.annotations.NotNull;
 
@@ -25,5 +27,12 @@ public class FarmlandGuide extends GeneralPlacementGuide {
     @Override
     protected @NotNull List<ItemStack> getRequiredItems() {
         return Arrays.stream(TILLABLE_BLOCKS).map(b -> getBlockItem(b.getDefaultState())).toList();
+    }
+
+    @Override
+    protected BlockState getPlacementTarget(ClientPlayerEntity player) {
+        // Keep the legacy choice of available tillable material, then let the
+        // tilling guide transform that server-confirmed block on a later tick.
+        return getRequiredItemAsBlock(player).orElse(Blocks.DIRT).getDefaultState();
     }
 }

@@ -91,6 +91,10 @@ public final class NativePlacementSolverChecks {
             checkSlabStages(fixture);
             fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
             assertions += StackedPlacementChecks.run(fixture.client, fixture.world.blocks, fixture.unsafe);
+            fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
+            assertions += InitialPlacementChecks.run(fixture.client, fixture.world.blocks, fixture.unsafe);
+            fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
+            assertions += BasicPlacementStageChecks.run(fixture.client, fixture.world.blocks, fixture.unsafe);
             checkHiddenSlabMerges(fixture);
             checkTrapdoorsAndLevers(fixture);
             checkDoorHinges(fixture);

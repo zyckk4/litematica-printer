@@ -10,6 +10,7 @@ import me.aleksilassila.litematica.printer.v1_21_4.actions.PrepareAction;
 import me.aleksilassila.litematica.printer.v1_21_4.guides.Guide;
 import me.aleksilassila.litematica.printer.v1_21_4.implementation.PrinterPlacementContext;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.MultifaceBlock;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.ItemStack;
 import org.jetbrains.annotations.NotNull;
@@ -42,7 +43,8 @@ public class BlockReplacementGuide extends Guide {
 
     private List<Action> prepare(ClientPlayerEntity player) {
         if (!NativePlacementSolver.canAddToStack(currentState, targetState)
-                && !NativePlacementSolver.canCompleteSlab(currentState, targetState)) return List.of();
+                && !NativePlacementSolver.canCompleteSlab(currentState, targetState)
+                && !NativePlacementSolver.canAddFaces(currentState, targetState)) return List.of();
         ItemStack stack = getRequiredItem(player).stream().findFirst().orElse(ItemStack.EMPTY);
         if (stack.isEmpty()) return List.of();
         BlockState next = NativePlacementSolver.placementTarget(state.world, state.schematic, state.blockPos, targetState);
@@ -52,7 +54,8 @@ public class BlockReplacementGuide extends Guide {
         var context = new PrinterPlacementContext(player, solution.hit(), stack, getRequiredItemStackSlot(player));
         ActionChain chain = new ActionChain();
         chain.addImmediateAction(new PrepareAction(context));
-        chain.addImmediateAction(new NativePlacementAction(state.blockPos, next, stack, solution));
+        BlockState actionTarget = next.getBlock() instanceof MultifaceBlock ? solution.predicted() : next;
+        chain.addImmediateAction(new NativePlacementAction(state.blockPos, actionTarget, stack, solution));
         return List.of(chain);
     }
 }

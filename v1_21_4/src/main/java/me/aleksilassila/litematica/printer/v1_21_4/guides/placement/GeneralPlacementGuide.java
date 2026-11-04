@@ -3,6 +3,8 @@ package me.aleksilassila.litematica.printer.v1_21_4.guides.placement;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import me.aleksilassila.litematica.printer.v1_21_4.LitematicaMixinMod;
+import me.aleksilassila.litematica.printer.v1_21_4.NativePlacementSolver;
+import me.aleksilassila.litematica.printer.v1_21_4.PlacementStages;
 import me.aleksilassila.litematica.printer.v1_21_4.Printer;
 import me.aleksilassila.litematica.printer.v1_21_4.SchematicBlockState;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
@@ -13,6 +15,8 @@ import net.minecraft.block.enums.SlabType;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.state.property.Properties;
+import net.minecraft.state.property.Property;
+import net.minecraft.state.property.BooleanProperty;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
@@ -49,6 +53,53 @@ public class GeneralPlacementGuide extends PlacementGuide {
 
     public GeneralPlacementGuide(SchematicBlockState state) {
         super(state);
+    }
+
+    @Override
+    protected List<ItemStack> getRequiredItems() {
+        return List.of(getBlockItem(PlacementStages.initialTarget(targetState)));
+    }
+
+    protected BlockState getPlacementTarget(ClientPlayerEntity player) {
+        return NativePlacementSolver.placementTarget(state.world, state.schematic, state.blockPos,
+                PlacementStages.initialTarget(targetState));
+    }
+
+    private boolean hasOccupiedInitialStage() {
+        return PlacementStages.initialTarget(targetState).getBlock() != targetState.getBlock()
+                && !currentState.isReplaceable();
+    }
+
+    private boolean matchesPlacement(BlockState result, ClientPlayerEntity player) {
+        BlockState desired = getPlacementTarget(player);
+        if (desired.getBlock() instanceof CaveVines && result.getBlock() instanceof CaveVines) {
+            return NativePlacementSolver.statesMatch(desired, result);
+        }
+        if (targetState.getBlock() instanceof MultifaceBlock && result.isOf(targetState.getBlock())) {
+            // A different planned face may be the only one visible from the
+            // current position. Accept one real addition, never an extra face
+            // or a transition that removes an existing attachment.
+            if (!NativePlacementSolver.matchesNextPlacement(state.world, state.blockPos, targetState, result)) return false;
+            for (Direction direction : Direction.values()) {
+                BooleanProperty face = MultifaceBlock.getProperty(direction);
+                if (!targetState.contains(face)) continue;
+                desired = desired.with(face, result.get(face));
+            }
+        }
+        if (result.getBlock() == desired.getBlock()) {
+            // This relaxation belongs only to the first placement simulation.
+            // Interaction guides still compare the requested final state.
+            for (Property<?> property : desired.getProperties()) {
+                if (NativePlacementSolver.isDeferredProperty(desired, property) && result.contains(property)) {
+                    desired = copyProperty(desired, result, property);
+                }
+            }
+        }
+        return statesEqual(result, desired);
+    }
+
+    private static <T extends Comparable<T>> BlockState copyProperty(BlockState desired, BlockState result, Property<T> property) {
+        return desired.with(property, result.get(property));
     }
 
     protected List<Direction> getPossibleSides() {
@@ -141,6 +192,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
 
     @Override
     public boolean canExecute(ClientPlayerEntity player) {
+        if (hasOccupiedInitialStage()) return false;
         if (!super.canExecute(player)) return false;
         if (!PrinterConfig.STRICT_BLOCK_FACE_CHECK.getBooleanValue()) {
             return true;
@@ -155,6 +207,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
 
     @Override
     public @Nullable PrinterPlacementContext getPlacementContext(ClientPlayerEntity player) {
+        if (hasOccupiedInitialStage()) return null;
         if (PrinterConfig.PRINTER_AIRPLACE.getBooleanValue()) {
             return getAirplaceContext(player);
         } else {
@@ -240,7 +293,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
                                 .orElse(targetState.getBlock())
                                 .getPlacementState(rayTraceContext);
 
-                        if (resultState != null && correctObserverPlacement(targetState, resultState) && (statesEqual(resultState, targetState) || correctChestPlacement(targetState, resultState))) {
+                        if (resultState != null && correctObserverPlacement(targetState, resultState) && (matchesPlacement(resultState, player) || correctChestPlacement(targetState, resultState))) {
                             contextCache = rayTraceContext;
                             return rayTraceContext;
                         }
@@ -254,7 +307,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
                             .orElse(targetState.getBlock())
                             .getPlacementState(context); // FIXME torch shift clicks another torch and getPlacementState is the clicked block, which is true
 
-                    if (result != null && correctObserverPlacement(targetState, result) && (statesEqual(result, targetState) || correctChestPlacement(targetState, result))) {
+                    if (result != null && correctObserverPlacement(targetState, result) && (matchesPlacement(result, player) || correctChestPlacement(targetState, result))) {
                         contextCache = context;
                         return context;
                     }
@@ -304,7 +357,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
             BlockHitResult hr = new BlockHitResult(Vec3d.ofCenter(state.blockPos), Direction.UP, state.blockPos, true);
             PrinterPlacementContext quick = new PrinterPlacementContext(player, hr, requiredItem, slot, null, false);
             BlockState res = getRequiredItemAsBlock(player).orElse(targetState.getBlock()).getPlacementState(quick);
-            if (res != null && correctObserverPlacement(targetState, res) && statesEqual(res, targetState)) {
+            if (res != null && correctObserverPlacement(targetState, res) && matchesPlacement(res, player)) {
                 contextCache = quick;
                 quick.isAirPlace = true;
                 return quick;
@@ -340,7 +393,7 @@ public class GeneralPlacementGuide extends PlacementGuide {
                             BlockState result = getRequiredItemAsBlock(player)
                                     .orElse(targetState.getBlock())
                                     .getPlacementState(context);
-                            if (result != null && correctObserverPlacement(targetState, result) && statesEqual(result, targetState)) {
+                            if (result != null && correctObserverPlacement(targetState, result) && matchesPlacement(result, player)) {
                                 contextCache = context;
                                 context.isAirPlace = true;
                                 return context;

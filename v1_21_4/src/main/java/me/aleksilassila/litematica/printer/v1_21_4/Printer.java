@@ -25,6 +25,7 @@ import net.minecraft.block.ObserverBlock;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.item.ItemStack;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.MultifaceBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -184,7 +185,8 @@ public class Printer {
                 // the same empty client world in this batch.
                 if (finalState.getBlock() instanceof ChestBlock && chestNeighborsInBatch.contains(position)) continue;
                 BlockState desired = NativePlacementSolver.placementTarget(mc.world, worldSchematic, position, finalState);
-                ItemStack required = MaterialCache.getInstance().getRequiredBuildItemForState(finalState, worldSchematic, position);
+                ItemStack required = MaterialCache.getInstance().getRequiredBuildItemForState(
+                        PlacementStages.initialTarget(finalState), worldSchematic, position);
                 if (required.isEmpty() || !inventoryManager.hasMaterial(required)) continue;
                 if (batchStack != null && !ItemStack.areItemsAndComponentsEqual(batchStack, required)) continue;
                 boolean allowAir = PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
@@ -222,7 +224,8 @@ public class Printer {
                     batchStack = required;
                     actionHandler.clearLookAction();
                 }
-                nativeActions.add(new NativePlacementAction(position, desired, required, solution));
+                BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
+                nativeActions.add(new NativePlacementAction(position, actionTarget, required, solution));
                 if (finalState.getBlock() instanceof ChestBlock) {
                     for (Direction side : Direction.Type.HORIZONTAL) chestNeighborsInBatch.add(position.offset(side));
                 }
@@ -313,9 +316,10 @@ public class Printer {
         if (state.targetState == null || state.targetState.isAir()) return false;
         if (state.currentState.equals(state.targetState)) return false;
         boolean addingToBlock = NativePlacementSolver.canCompleteSlab(state.currentState, state.targetState)
-                || NativePlacementSolver.canAddToStack(state.currentState, state.targetState);
+                || NativePlacementSolver.canAddToStack(state.currentState, state.targetState)
+                || NativePlacementSolver.canAddFaces(state.currentState, state.targetState);
         if (state.currentState.getBlock() == state.targetState.getBlock() && !addingToBlock) return false;
-        if (!(state.targetState.getBlock().asItem() instanceof net.minecraft.item.BlockItem)) return false;
+        if (!(PlacementStages.initialTarget(state.targetState).getBlock().asItem() instanceof net.minecraft.item.BlockItem)) return false;
         if (playerOccupied.contains(state.blockPos)) return false;
         if (requiresLegacyGuide(state.targetState)) return false;
         if (state.targetState.getBlock() instanceof ChestBlock) {

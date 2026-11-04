@@ -114,6 +114,21 @@ public final class InteractionRegressionChecks {
         for (int pitch = 0; pitch <= 24; pitch++) {
             check(CycleStateGuide.needsInteraction(note, note.with(NoteBlock.NOTE, pitch)) == (pitch != 0), "Note comparison");
         }
+        BlockState detector = Blocks.DAYLIGHT_DETECTOR.getDefaultState();
+        for (boolean currentMode : new boolean[]{false, true}) {
+            for (boolean targetMode : new boolean[]{false, true}) {
+                for (int currentPower = 0; currentPower <= 15; currentPower++) {
+                    for (int targetPower = 0; targetPower <= 15; targetPower++) {
+                        BlockState current = detector.with(DaylightDetectorBlock.INVERTED, currentMode)
+                                .with(DaylightDetectorBlock.POWER, currentPower);
+                        BlockState target = detector.with(DaylightDetectorBlock.INVERTED, targetMode)
+                                .with(DaylightDetectorBlock.POWER, targetPower);
+                        check(CycleStateGuide.needsInteraction(current, target) == (currentMode != targetMode),
+                                "Daylight detector tuning depends on ambient power or misses its mode");
+                    }
+                }
+            }
+        }
         check(!CycleStateGuide.needsInteraction(lever, trapdoor), "Different block types would be interacted with");
         for (Direction gateFacing : Direction.Type.HORIZONTAL) {
             BlockState closed = Blocks.OAK_FENCE_GATE.getDefaultState().with(FenceGateBlock.FACING, gateFacing);
@@ -545,6 +560,8 @@ public final class InteractionRegressionChecks {
             Printer.confirmNativePlacement(target, repeater.with(RepeaterBlock.DELAY, 2));
             check(!Printer.hasPendingPlacement(target), "Next dial step was not confirmed");
 
+            checkDaylightInteractions(fixture, world, schematic, limiter, printer);
+
             BlockState dry = Blocks.OAK_SLAB.getDefaultState();
             world.blocks.put(target, dry);
             schematic.desired = dry.with(Properties.WATERLOGGED, true);
@@ -598,6 +615,48 @@ public final class InteractionRegressionChecks {
             PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(nativeOmni);
             PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(stop);
         }
+    }
+
+    private static void checkDaylightInteractions(Fixture fixture, FixtureWorld world, FixtureSchematic schematic,
+                                                  PlacementRateLimiter limiter, Printer printer) throws Exception {
+        var player = fixture.player;
+        BlockPos target = schematic.target;
+        for (boolean moving : new boolean[]{false, true}) {
+            PrinterConfig.PRINTER_NATIVE_MOVING.setBooleanValue(moving);
+            PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(moving);
+            set(Entity.class, player, "velocity", moving ? new Vec3d(0.16, 0, 0) : Vec3d.ZERO);
+            for (boolean initiallyInverted : new boolean[]{false, true}) {
+                limiter.reset();
+                BlockState before = Blocks.DAYLIGHT_DETECTOR.getDefaultState()
+                        .with(DaylightDetectorBlock.INVERTED, initiallyInverted).with(DaylightDetectorBlock.POWER, 15);
+                world.blocks.put(target, before);
+                schematic.desired = before.with(DaylightDetectorBlock.INVERTED, !initiallyInverted)
+                        .with(DaylightDetectorBlock.POWER, 0);
+                int packets = fixture.network.blockPackets.size();
+                check(schedule(printer), "Daylight detector mode was not scheduled, moving=" + moving);
+                check(fixture.network.blockPackets.size() == packets, "Detector toggled before its action was processed");
+                if (moving) printer.flushNativePlacements();
+                else printer.actionHandler.processCurrentTickActions();
+                check(fixture.network.blockPackets.size() == packets + 1 && Printer.hasPendingPlacement(target),
+                        "Detector toggle did not send exactly one pending interaction");
+                check(fixture.network.blockPackets.get(packets).getBlockHitResult().getBlockPos().equals(target),
+                        "Detector interaction targeted another block");
+                BlockState powerUpdate = before.with(DaylightDetectorBlock.POWER, 7);
+                world.blocks.put(target, powerUpdate);
+                Printer.confirmNativePlacement(target, powerUpdate);
+                check(Printer.hasPendingPlacement(target) && !printer.onGameTick(),
+                        "A daylight power update released the pending mode toggle");
+                BlockState confirmed = powerUpdate.with(DaylightDetectorBlock.INVERTED, !initiallyInverted);
+                world.blocks.put(target, confirmed);
+                Printer.confirmNativePlacement(target, confirmed);
+                check(!Printer.hasPendingPlacement(target), "Detector mode acknowledgement was not accepted");
+                SchematicBlockState completed = new SchematicBlockState(world, schematic, target);
+                check(!new CycleStateGuide(completed).canExecute(player)
+                                && MovingPrinterAction.prepare(completed, player, player.reach) == null,
+                        "Matched detector mode was clicked again because its power differed");
+            }
+        }
+        limiter.reset();
     }
 
     private static void checkRailConnections(FixtureWorld world, FixtureSchematic schematic, BlockPos target) throws Exception {
