@@ -23,6 +23,15 @@ public final class NativeRegressionChecks {
     public static void main(String[] args) throws Exception {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
+        if (java.util.Arrays.asList(args).contains("--state-interactions")) {
+            int movingChecks = MovingStateRegressionChecks.run();
+            int sneakChecks = SneakRecoveryChecks.run();
+            int interactionChecks = InteractionRegressionChecks.run();
+            System.out.println("Focused state interaction checks passed: " + movingChecks
+                    + " moving-state assertions; " + sneakChecks + " sneak-recovery assertions; "
+                    + interactionChecks + " existing interaction assertions.");
+            return;
+        }
         checkLatticeAgainstVanilla();
         checkBudgetDefaults();
         checkRollingBudget();
@@ -35,10 +44,13 @@ public final class NativeRegressionChecks {
         int solverChecks = NativePlacementSolverChecks.run();
         int interactionChecks = InteractionRegressionChecks.run();
         int conversionChecks = SchematicConversionRegressionChecks.run();
+        int movingChecks = MovingStateRegressionChecks.run();
+        int sneakChecks = SneakRecoveryChecks.run();
         System.out.println("Native regression checks passed: " + assertions
                 + " movement/rate assertions; " + placementChecks + " placement-context assertions; "
                 + solverChecks + " full-solver assertions; " + interactionChecks + " state/inventory/interaction assertions; "
-                + conversionChecks + " schematic-conversion assertions.");
+                + conversionChecks + " schematic-conversion assertions; " + movingChecks
+                + " moving-state assertions; " + sneakChecks + " sneak-recovery assertions.");
     }
 
     private static void checkLatticeAgainstVanilla() throws Exception {

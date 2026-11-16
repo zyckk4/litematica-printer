@@ -88,7 +88,10 @@ budget. Lower the burst or increase the window if interactions are rejected.
 
 With `printerNativeMoving` enabled, ordinary placements take priority. While moving,
 the printer can also lay supported rails, adjust repeaters, comparators, note
-blocks and daylight detectors, and waterlog eligible targets. Leave an empty inventory slot for tuning
+blocks, daylight detectors, levers and manually operable doors, trapdoors and
+fence gates, and waterlog eligible targets. Door halves share a pending toggle
+until their server updates arrive; fence gates wait for an angle that preserves
+their facing. Leave an empty inventory slot for tuning
 and release sneak for tuning and bucket use. Rail connections depend on the
 support and neighboring tracks already in the world. Stand still for other
 specialized guides and precise sign rotations. Adjacent independent single
@@ -172,6 +175,10 @@ Output is under `v1_21_11/build/libs/`. Install the remapped printer JAR; the
 `-sources.jar` is for development. `check` and `build` run the native regression
 harness under Fabric Knot. These checks verify code and loading behavior;
 gameplay and server acceptance require a client test.
+
+For the focused moving-state and temporary-sneak regression checks, run
+`./gradlew :v1_21_11:nativeRegression --args=--state-interactions`
+(use `.\gradlew.bat` on Windows).
 
 After committing the reviewed files and building from a clean working tree,
 run `python scripts/prepare_release.py` with Python 3.11 or newer to create local

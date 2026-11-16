@@ -48,6 +48,7 @@ public class MixinClientPlayerEntity extends AbstractClientPlayerEntity {
     public void tickHead(CallbackInfo ci) {
         ClientPlayerEntity clientPlayer = (ClientPlayerEntity) (Object) this;
         if (LitematicaMixinMod.printer == null || LitematicaMixinMod.printer.player != clientPlayer) {
+            if (LitematicaMixinMod.printer != null) LitematicaMixinMod.printer.actionHandler.clear();
             System.out.println("Initializing printer, player: " + clientPlayer + ", client: " + client);
             LitematicaMixinMod.printer = new Printer(client, clientPlayer);
         }
