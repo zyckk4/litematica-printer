@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.6**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.7**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -13,6 +13,7 @@ the earlier implementation is maintained separately on `1.21.4`.
   and world movement direction.
 - Place throughout the configured range using native airplace and placement
   simulation, with support and collision checks.
+- Print the first row outside the world border by clicking existing inside supports.
 - Handle directional blocks, attachments, staged double chests and double slabs.
 - Replenish materials from the inventory and track placement results from server
   block updates.
@@ -31,7 +32,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.6-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.7-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -86,6 +87,22 @@ budget. Lower the burst or increase the window if interactions are rejected.
 
 ## Placement limits
 
+Native placement can reach one block outside each side of the world border when
+the directly adjacent inside cell already contains a usable, non-interactive
+support. It sends an outward-face click on that inside block; no torch or other
+temporary helper is placed. This route works with moving, stationary and
+rotation-independent native placement. It never clicks an outside block or
+extends to a second row or a diagonally outside corner. Missing or unsuitable
+inside supports are skipped.
+
+For these border placements, the outward face is allowed even with
+`printerStrictBlockFaceCheck` or `printerRaycastStrictBlockHit` enabled.
+`printerRaycast` still checks for intervening blocks. Reach, collision, fluid
+protection and item placement rules still apply, and the border and support are
+rechecked immediately before sending. Server acceptance of outward-face clicks
+is required. Further interactions with outside blocks, such as repeater tuning,
+remain restricted by the server's border checks.
+
 With `printerNativeMoving` enabled, ordinary placements take priority. While moving,
 the printer can also lay supported rails, adjust repeaters, comparators, note
 blocks, daylight detectors, levers and manually operable doors, trapdoors and
@@ -131,7 +148,7 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.6
+## Remaining issues in 3.4.7
 
 | Area | Trigger and observed code behavior |
 | --- | --- |

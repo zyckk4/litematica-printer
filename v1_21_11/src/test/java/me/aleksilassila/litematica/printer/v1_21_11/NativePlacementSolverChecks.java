@@ -105,6 +105,7 @@ public final class NativePlacementSolverChecks {
             checkDoorHinges(fixture);
             checkStandingSigns(fixture);
             checkRevalidationAndRejection(fixture);
+            checkWorldBorderPlacements(fixture);
             checkNativeCameraIsolation(fixture);
             checkSprintTapProtection(fixture);
             checkAirborneAndJumpRotation(fixture);
@@ -622,6 +623,233 @@ public final class NativePlacementSolverChecks {
         fixture.world.blocks.put(new BlockPos(1, 65, 0), Blocks.STONE.getDefaultState());
         check(NativePlacementSolver.solveStationary(new BlockPos(3, 65, 0), desired,
                 fixture.player.heldStack, 4.5, true) != null, "Raycast-disabled airplace was blocked by a wall");
+    }
+
+    private static void checkWorldBorderPlacements(Fixture fixture) throws Exception {
+        WorldBorder border = fixture.world.border;
+        double centerX = border.getCenterX(), centerZ = border.getCenterZ(), size = border.getSize();
+        boolean strict = PrinterConfig.STRICT_BLOCK_FACE_CHECK.getBooleanValue();
+        boolean raycast = PrinterConfig.RAYCAST.getBooleanValue();
+        boolean strictRaycast = PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.getBooleanValue();
+        boolean replaceSources = LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.getBooleanValue();
+        BlockState desired = Blocks.STONE.getDefaultState();
+        try {
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(true);
+            PrinterConfig.RAYCAST.setBooleanValue(true);
+            PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.setBooleanValue(true);
+            // Include fractional/shifted borders and the real default boundary;
+            // negative borders have an inclusive minimum and exclusive maximum.
+            for (double[] bounds : new double[][]{{0, 0, 8}, {10.25, -7.75, 8.5}, {0, 0, 59_999_968}}) {
+                border.setCenter(bounds[0], bounds[1]);
+                border.setSize(bounds[2]);
+                for (Direction outward : Direction.Type.HORIZONTAL) {
+                    int x = (int) Math.floor(border.getCenterX());
+                    int z = (int) Math.floor(border.getCenterZ());
+                    if (outward == Direction.EAST) x = (int) Math.ceil(border.getBoundEast());
+                    if (outward == Direction.WEST) x = (int) Math.ceil(border.getBoundWest()) - 1;
+                    if (outward == Direction.SOUTH) z = (int) Math.ceil(border.getBoundSouth());
+                    if (outward == Direction.NORTH) z = (int) Math.ceil(border.getBoundNorth()) - 1;
+                    BlockPos target = new BlockPos(x, 65, z);
+                    BlockPos support = target.offset(outward.getOpposite());
+                    check(!border.contains(target) && border.contains(support), "Invalid border fixture: " + target);
+                    for (Motion motion : Motion.values()) {
+                        fixture.configure(Blocks.STONE, 23.0F, -31.0F, motion);
+                        fixture.moveTo(Vec3d.ofCenter(support)
+                                .subtract(Vec3d.of(outward.getVector()).multiply(2.5)).add(0, -1.5, 0));
+                        fixture.world.blocks.put(support, desired);
+                        for (boolean allowAir : new boolean[]{false, true}) {
+                            for (NativePlacementSolver.Solution solution : borderSolutions(fixture, target, 4.5, allowAir)) {
+                                check(solution != null, "Border solver rejected inside support: " + target + " " + motion);
+                                check(solution.hit().getBlockPos().equals(support) && solution.hit().getSide() == outward
+                                                && !solution.airPlace() && desired.equals(solution.predicted()),
+                                        "Border solution did not use the inside anchor's outward face");
+                                check(fixture.player.getEyePos().subtract(solution.hit().getPos())
+                                                .dotProduct(Vec3d.of(outward.getVector())) < 0,
+                                        "Border fixture did not exercise hidden-face placement");
+                                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack,
+                                                solution, 4.5) != null,
+                                        "Border solution failed send-time revalidation");
+                            }
+                        }
+                    }
+                }
+            }
+
+            border.setCenter(0, 0);
+            border.setSize(8);
+            BlockPos target = new BlockPos(4, 65, 0);
+            BlockPos support = target.west();
+            for (Block directional : new Block[]{Blocks.PISTON, Blocks.OBSERVER}) {
+                for (Direction facing : Direction.values()) {
+                    for (Motion motion : new Motion[]{Motion.STILL, Motion.WALK}) {
+                        fixture.configure(directional, 23.0F, -31.0F, motion);
+                        fixture.moveTo(new Vec3d(1, 64, 0.5));
+                        fixture.world.blocks.put(support, desired);
+                        BlockState oriented = directional.getDefaultState().with(Properties.FACING, facing);
+                        NativePlacementSolver.Solution first = motion == Motion.STILL
+                                ? NativePlacementSolver.solveStationary(target, oriented, fixture.player.heldStack, 4.5, true)
+                                : NativePlacementSolver.solveMoving(target, oriented, fixture.player.heldStack, 4.5, true, false);
+                        check(first != null && first.predicted().equals(oriented) && !first.anyRotation()
+                                        && first.hit().getBlockPos().equals(support) && !first.airPlace(),
+                                "Border directional placement failed: " + oriented + " " + motion);
+                        NativePlacementSolver.Solution batch = NativePlacementSolver.solveMovingAtRotation(target,
+                                oriented, fixture.player.heldStack, 4.5, true, false, first.yaw(), first.pitch());
+                        check(batch != null && batch.predicted().equals(oriented)
+                                        && batch.hit().getBlockPos().equals(support) && !batch.airPlace(),
+                                "Border directional batch did not reuse the selected rotation: " + oriented);
+                    }
+                }
+            }
+            fixture.configure(Blocks.STONE, 23.0F, -31.0F, Motion.WALK);
+            fixture.moveTo(new Vec3d(1, 64, 0.5));
+            fixture.world.blocks.put(support, desired);
+            NativePlacementSolver.Solution original = NativePlacementSolver.solveMoving(target, desired,
+                    fixture.player.heldStack, 4.5, true, false);
+            check(original != null, "Border revalidation fixture has no initial solution");
+
+            for (Block invalid : new Block[]{Blocks.AIR, Blocks.SHORT_GRASS, Blocks.WATER, Blocks.LAVA,
+                    Blocks.CHEST, Blocks.OAK_BUTTON, Blocks.LEVER}) {
+                fixture.world.blocks.put(support, invalid.getDefaultState());
+                checkBorderRejected(fixture, target, 4.5, "Invalid inside support " + invalid);
+                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                        "Queued border hit survived support replacement with " + invalid);
+            }
+            fixture.world.blocks.remove(support);
+            fixture.world.blocks.put(target.east(), desired);
+            fixture.world.blocks.put(target.down(), desired);
+            checkBorderRejected(fixture, target, 4.5, "Outside-only supports");
+            fixture.world.blocks.clear();
+            fixture.world.blocks.put(support, desired);
+            fixture.world.blocks.put(target, desired);
+            checkBorderRejected(fixture, target.east(), 4.5, "Second outside layer");
+            checkBorderRejected(fixture, target, 4.5, "Occupied outside target");
+            check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                    "Queued border hit survived target occupation");
+            fixture.world.blocks.clear();
+            BlockPos corner = new BlockPos(4, 65, 4);
+            fixture.moveTo(new Vec3d(2.5, 64, 2.5));
+            fixture.world.blocks.put(corner.west(), desired);
+            fixture.world.blocks.put(corner.north(), desired);
+            checkBorderRejected(fixture, corner, 4.5, "Diagonal outside corner");
+
+            fixture.world.blocks.clear();
+            fixture.world.blocks.put(support, desired);
+            fixture.moveTo(new Vec3d(1, 64, 0.5));
+            checkBorderRejected(fixture, target, 2.0, "Configured reach");
+            fixture.moveTo(new Vec3d(-1, 64, 0.5));
+            checkBorderRejected(fixture, target, 20.0, "Actual player reach cap");
+            check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                    "Queued border hit ignored movement beyond reach");
+            fixture.moveTo(new Vec3d(3.8, 64, 0.5));
+            checkBorderRejected(fixture, target, 4.5, "Player collision at outside target");
+            fixture.moveTo(new Vec3d(1, 64, 0.5));
+            border.setSize(6);
+            check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                    "Queued border hit ignored border shrink");
+            border.setSize(10);
+            check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                    "Expanded border retained the former outside goal's hidden-face exception");
+            fixture.world.blocks.remove(support);
+            NativePlacementSolver.Solution insideAir = NativePlacementSolver.solveStationary(target, desired,
+                    fixture.player.heldStack, 4.5, true);
+            check(insideAir != null && insideAir.airPlace() && insideAir.hit().getBlockPos().equals(target),
+                    "Inside-air border transition fixture did not select a target-position click");
+            border.setSize(8);
+            check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, insideAir, 4.5) == null,
+                    "Former inside air click survived shrink without an inside anchor");
+            fixture.world.blocks.put(support, desired);
+            NativePlacementSolver.Solution refreshed = NativePlacementSolver.revalidate(target, desired,
+                    fixture.player.heldStack, insideAir, 4.5);
+            check(refreshed != null && refreshed.hit().getBlockPos().equals(support) && !refreshed.airPlace(),
+                    "Former inside air click did not refresh to an inside anchor after shrink");
+            LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.setBooleanValue(false);
+            for (Block fluid : new Block[]{Blocks.WATER, Blocks.LAVA}) {
+                fixture.world.blocks.put(target, fluid.getDefaultState());
+                checkBorderRejected(fixture, target, 4.5, "Protected outside source " + fluid);
+                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                        "Queued border hit replaced a protected source");
+                fixture.world.blocks.put(target, fluid.getDefaultState().with(net.minecraft.block.FluidBlock.LEVEL, 1));
+                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) != null,
+                        "Border path incorrectly protected flowing fluid");
+            }
+            fixture.world.blocks.remove(target);
+
+            // Border face exceptions must not disable real obstruction checks.
+            BlockPos obstruction = new BlockPos(2, 65, 0);
+            fixture.world.blocks.put(obstruction, desired);
+            checkBorderRejected(fixture, target, 4.5, "Obstructed inside anchor");
+            check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, original, 4.5) == null,
+                    "Queued border hit ignored a new obstruction");
+            PrinterConfig.RAYCAST.setBooleanValue(false);
+            check(NativePlacementSolver.solveAnyRotation(target, desired, fixture.player.heldStack, 4.5) != null,
+                    "Border path forced raycasting on while disabled");
+            fixture.world.blocks.remove(obstruction);
+
+            for (BlockHitResult forgedHit : new BlockHitResult[]{
+                    new BlockHitResult(Vec3d.ofCenter(target), Direction.EAST, target, false),
+                    new BlockHitResult(Vec3d.ofCenter(target.east()), Direction.WEST, target.east(), false),
+                    new BlockHitResult(Vec3d.ofCenter(target.down()), Direction.UP, target.down(), false)}) {
+                NativePlacementSolver.Solution forged = new NativePlacementSolver.Solution(forgedHit, desired,
+                        original.yaw(), original.pitch(), 0, true, true);
+                NativePlacementSolver.Solution checked = NativePlacementSolver.revalidate(target, desired,
+                        fixture.player.heldStack, forged, 4.5);
+                check(checked == null || (checked.hit().getBlockPos().equals(support) && !checked.airPlace()),
+                        "Revalidation retained a forged outside/self/air click");
+                fixture.world.blocks.remove(support);
+                check(NativePlacementSolver.revalidate(target, desired, fixture.player.heldStack, forged, 4.5) == null,
+                        "Forged outside/self/air hit worked without an inside anchor");
+                fixture.world.blocks.put(support, desired);
+            }
+
+            // Inside goals must also reject clicked blocks outside the border.
+            fixture.world.blocks.clear();
+            fixture.world.blocks.put(target, desired);
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(false);
+            NativePlacementSolver.Solution outsideSupport = new NativePlacementSolver.Solution(
+                    new BlockHitResult(Vec3d.ofCenter(target).add(-0.5, 0, 0), Direction.WEST, target, false),
+                    desired, 0, 0, 0, false, false);
+            check(NativePlacementSolver.solveStationary(support, desired, fixture.player.heldStack, 4.5, false) == null,
+                    "Inside target used an outside anchor");
+            check(NativePlacementSolver.revalidate(support, desired, fixture.player.heldStack, outsideSupport, 4.5) == null,
+                    "Inside revalidation retained an outside anchor");
+            fixture.world.blocks.clear();
+            fixture.world.blocks.put(support.west(), desired);
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(true);
+            check(NativePlacementSolver.solveStationary(support, desired, fixture.player.heldStack, 4.5, false) == null,
+                    "Border exception disabled strict face checking for an inside goal");
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(false);
+            PrinterConfig.RAYCAST.setBooleanValue(true);
+            check(NativePlacementSolver.solveStationary(support, desired, fixture.player.heldStack, 4.5, false) == null,
+                    "Border exception disabled strict raycast face matching for an inside goal");
+            PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.setBooleanValue(false);
+            check(NativePlacementSolver.solveStationary(support, desired, fixture.player.heldStack, 4.5, false) != null,
+                    "Inside support fixture should succeed when both face restrictions are disabled");
+        } finally {
+            border.setCenter(centerX, centerZ);
+            border.setSize(size);
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(strict);
+            PrinterConfig.RAYCAST.setBooleanValue(raycast);
+            PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.setBooleanValue(strictRaycast);
+            LitematicaMixinMod.REPLACE_FLUIDS_SOURCE_BLOCKS.setBooleanValue(replaceSources);
+            fixture.configure(Blocks.STONE, 0, 0, Motion.STILL);
+        }
+    }
+
+    private static NativePlacementSolver.Solution[] borderSolutions(Fixture fixture, BlockPos target,
+                                                                   double reach, boolean allowAir) {
+        BlockState desired = Blocks.STONE.getDefaultState();
+        return new NativePlacementSolver.Solution[]{
+                NativePlacementSolver.solveStationary(target, desired, fixture.player.heldStack, reach, allowAir),
+                NativePlacementSolver.solveMoving(target, desired, fixture.player.heldStack, reach, allowAir, fixture.player.isSprinting()),
+                NativePlacementSolver.solveAnyRotation(target, desired, fixture.player.heldStack, reach),
+                NativePlacementSolver.solveMovingAtRotation(target, desired, fixture.player.heldStack, reach, allowAir,
+                        fixture.player.isSprinting(), fixture.player.getYaw(), fixture.player.getPitch())};
+    }
+
+    private static void checkBorderRejected(Fixture fixture, BlockPos target, double reach, String reason) {
+        for (NativePlacementSolver.Solution solution : borderSolutions(fixture, target, reach, true)) {
+            check(solution == null, reason + " was accepted by a public solver entrypoint");
+        }
     }
 
     private enum Motion { STILL, WALK, DIAGONAL, SPRINT }
