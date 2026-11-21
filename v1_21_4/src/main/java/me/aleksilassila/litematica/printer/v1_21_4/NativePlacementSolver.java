@@ -25,6 +25,7 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 import net.minecraft.world.BlockView;
+import net.minecraft.world.border.WorldBorder;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -248,7 +249,7 @@ public final class NativePlacementSolver {
         return solution;
     }
 
-    /** Returns only rotation-independent airplace solutions; never a directional fallback. */
+    /** Rotation-independent airplace, or an inside support for a target just outside the border. */
     public static Solution solveAnyRotation(BlockPos target, BlockState desired, ItemStack stack, double reach) {
         if (!canSolve(target, stack)) return null;
         return solveAnyRotation(target, desired, stack, candidates(target, desired, reach, true, false));
@@ -304,7 +305,7 @@ public final class NativePlacementSolver {
         MinecraftClient mc = MinecraftClient.getInstance();
         BlockHitResult hit = solution.hit();
         if (canClick(mc.world.getBlockState(hit.getBlockPos()))
-                && validHit(mc.player.getEyePos(), hit, effectiveReach(reach))) {
+                && validHit(target, mc.player.getEyePos(), hit, effectiveReach(reach))) {
             BlockState predicted = simulate(target, stack, hit, yaw, pitch);
             if (matchesNextPlacement(mc.world, target, desired, predicted)
                     && (!(desired.getBlock() instanceof MultifaceBlock) || statesMatch(desired, predicted))) {
@@ -328,8 +329,17 @@ public final class NativePlacementSolver {
     private static boolean canSolve(BlockPos target, ItemStack stack) {
         MinecraftClient mc = MinecraftClient.getInstance();
         return mc.player != null && mc.world != null && !stack.isEmpty() && stack.getItem() instanceof BlockItem
-                && mc.world.isInBuildLimit(target) && mc.world.getWorldBorder().contains(target)
+                && mc.world.isInBuildLimit(target) && withinPlacementBorder(mc.world.getWorldBorder(), target)
                 && BlockHelper.canReplaceFluid(mc.world.getBlockState(target));
+    }
+
+    /** The outer row must have a face-adjacent inside cell; diagonal corners do not qualify. */
+    private static boolean withinPlacementBorder(WorldBorder border, BlockPos target) {
+        if (border.contains(target)) return true;
+        for (Direction side : Direction.Type.HORIZONTAL) {
+            if (border.contains(target.offset(side))) return true;
+        }
+        return false;
     }
 
     private static double effectiveReach(double reach) {
@@ -342,11 +352,27 @@ public final class NativePlacementSolver {
         Vec3d eye = mc.player.getEyePos();
         double reach = effectiveReach(configuredReach);
         List<HitCandidate> result = new ArrayList<>();
+        WorldBorder border = mc.world.getWorldBorder();
+        if (!border.contains(target)) {
+            // Vanilla checks the clicked cell against the border, then offsets
+            // the placement into its neighbor. Air at the inside cell would be
+            // replaced in place, so this route always needs an existing support.
+            // It also serves rotation-independent native placement (allowSupports=false).
+            for (Direction side : Direction.Type.HORIZONTAL) {
+                BlockPos support = target.offset(side);
+                if (!border.contains(support)) continue;
+                BlockState state = mc.world.getBlockState(support);
+                if (!state.isReplaceable() && canClick(state) && !state.getOutlineShape(mc.world, support).isEmpty()) {
+                    addFace(result, target, eye, support, side.getOpposite(), false, reach);
+                }
+            }
+            return result;
+        }
         // Target-position interaction is the native airplace path. A local
         // inside=true flag is unnecessary and would differ from the wire hit.
         BlockState targetState = mc.world.getBlockState(target);
         if (canAddFaces(targetState, desired)) {
-            for (Direction face : Direction.values()) addFace(result, eye, target, face, false, reach);
+            for (Direction face : Direction.values()) addFace(result, target, eye, target, face, false, reach);
             // Clicking a missing face's support makes vanilla prioritize that
             // attachment independently of look. This also serves the legacy
             // rotation-independent top-up guide.
@@ -356,7 +382,7 @@ public final class NativePlacementSolver {
                 BlockPos support = target.offset(direction);
                 BlockState supportState = mc.world.getBlockState(support);
                 if (!supportState.isReplaceable() && canClick(supportState)) {
-                    addFace(result, eye, support, direction.getOpposite(), false, reach);
+                    addFace(result, target, eye, support, direction.getOpposite(), false, reach);
                 }
             }
             return result;
@@ -368,75 +394,88 @@ public final class NativePlacementSolver {
                 for (Direction face : Direction.values()) {
                     Vec3d sample = center.add(face.getOffsetX() * box.getLengthX() / 2,
                             face.getOffsetY() * box.getLengthY() / 2, face.getOffsetZ() * box.getLengthZ() / 2);
-                    addHit(result, eye, target, face, sample, false, reach);
+                    addHit(result, target, eye, target, face, sample, false, reach);
                 }
             }
             return result;
         }
         if (allowAir && targetState.isReplaceable()) {
-            for (Direction face : Direction.values()) addFace(result, eye, target, face, true, reach);
+            for (Direction face : Direction.values()) addFace(result, target, eye, target, face, true, reach);
         } else if ((allowSupports || canCompleteSlab(targetState, desired)) && targetState.getBlock() instanceof SlabBlock
                 && targetState.get(SlabBlock.TYPE) != SlabType.DOUBLE) {
             // Slab.canReplace depends on the held slab, side and hit height.
             // Let the real context validate each same-position merge.
-            for (Direction face : Direction.values()) addFace(result, eye, target, face, false, reach);
+            for (Direction face : Direction.values()) addFace(result, target, eye, target, face, false, reach);
         }
         if (allowSupports) {
             for (Direction side : Direction.values()) {
                 BlockPos support = target.offset(side);
                 BlockState state = mc.world.getBlockState(support);
                 if (!state.isReplaceable() && canClick(state) && !state.getOutlineShape(mc.world, support).isEmpty()) {
-                    addFace(result, eye, support, side.getOpposite(), false, reach);
+                    addFace(result, target, eye, support, side.getOpposite(), false, reach);
                 }
             }
         }
         return result;
     }
 
-    private static void addFace(List<HitCandidate> hits, Vec3d eye, BlockPos block, Direction face, boolean air, double reach) {
+    private static void addFace(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block,
+                                Direction face, boolean air, double reach) {
         Vec3d center = Vec3d.ofCenter(block).add(Vec3d.of(face.getVector()).multiply(0.5));
         // Clamp eye coordinates onto the face first. This reaches
         // near edges without requiring the face centre to be inside reach.
         double eyeU = face.getAxis() == Direction.Axis.X ? eye.z - block.getZ() : eye.x - block.getX();
         double eyeV = face.getAxis() == Direction.Axis.Y ? eye.z - block.getZ() : eye.y - block.getY();
-        addHit(hits, eye, block, face, offset(center, face,
+        addHit(hits, target, eye, block, face, offset(center, face,
                 MathHelper.clamp(eyeU, 0.05, 0.95) - 0.5, MathHelper.clamp(eyeV, 0.05, 0.95) - 0.5), air, reach);
         for (double u : SAMPLES) {
-            for (double v : SAMPLES) addHit(hits, eye, block, face, offset(center, face, u - 0.5, v - 0.5), air, reach);
+            for (double v : SAMPLES) addHit(hits, target, eye, block, face, offset(center, face, u - 0.5, v - 0.5), air, reach);
         }
     }
 
-    private static void addHit(List<HitCandidate> hits, Vec3d eye, BlockPos block, Direction face,
+    private static void addHit(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block, Direction face,
                                 Vec3d sample, boolean air, double reach) {
         BlockHitResult hit = new BlockHitResult(sample, face, block, false);
         for (HitCandidate existing : hits) {
             if (existing.hit().getBlockPos().equals(block) && existing.hit().getSide() == face
                     && existing.hit().getPos().squaredDistanceTo(sample) < 1.0E-12) return;
         }
-        if (validHit(eye, hit, reach)) hits.add(new HitCandidate(hit, air));
+        if (validHit(target, eye, hit, reach)) hits.add(new HitCandidate(hit, air));
     }
 
-    private static boolean validHit(Vec3d eye, BlockHitResult hit, double reach) {
+    private static boolean validHit(BlockPos target, Vec3d eye, BlockHitResult hit, double reach) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        WorldBorder border = mc.world.getWorldBorder();
+        BlockPos clicked = hit.getBlockPos();
+        if (!border.contains(clicked)) return false;
+        BlockState support = mc.world.getBlockState(clicked);
+        boolean acrossBorder = !border.contains(target);
+        // Recheck the anchor as well as the goal after movement/world updates.
+        // Never preserve a cached outside air click or extend from the outer row.
+        if (acrossBorder && (hit.getSide().getAxis() == Direction.Axis.Y
+                || !clicked.offset(hit.getSide()).equals(target) || support.isReplaceable()
+                || !canClick(support) || support.getOutlineShape(mc.world, clicked).isEmpty())) return false;
         double distanceSq = eye.squaredDistanceTo(hit.getPos());
         if (distanceSq < 1.0E-6 || distanceSq > reach * reach) return false;
         // An air interaction's side is a placement input (e.g. hopper outlet),
         // not a visible surface of a solid block. All six sides must survive
         // both preparation and send-time validation. Solid supports retain the
-        // configured face restriction; raycast is an independent opt-in gate.
-        if (!MinecraftClient.getInstance().world.getBlockState(hit.getBlockPos()).isReplaceable()
+        // configured face restriction. The border route deliberately uses the
+        // outward face of an inside support, even from its hidden side.
+        if (!acrossBorder && !support.isReplaceable()
                 && PrinterConfig.STRICT_BLOCK_FACE_CHECK.getBooleanValue()
                 && eye.subtract(hit.getPos()).dotProduct(Vec3d.of(hit.getSide().getVector())) <= 0) return false;
         if (!PrinterConfig.RAYCAST.getBooleanValue()) return true;
 
-        MinecraftClient mc = MinecraftClient.getInstance();
         Vec3d direction = hit.getPos().subtract(eye);
         Vec3d end = hit.getPos().add(direction.normalize().multiply(0.001));
         BlockHitResult obstruction = mc.world.raycast(new RaycastContext(eye, end,
                 RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player));
         // An air target has no outline to hit. A clear ray is still valid.
         if (obstruction.getType() == HitResult.Type.MISS) return mc.world.getBlockState(hit.getBlockPos()).isReplaceable();
-        return obstruction.getBlockPos().equals(hit.getBlockPos())
-                && (!PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.getBooleanValue() || obstruction.getSide() == hit.getSide());
+        return obstruction.getBlockPos().equals(clicked)
+                && (acrossBorder || !PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.getBooleanValue()
+                        || obstruction.getSide() == hit.getSide());
     }
 
     private static boolean canClick(BlockState state) {

@@ -9,6 +9,7 @@ import me.aleksilassila.litematica.printer.v1_21_4.actions.Action;
 import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.mixin.MixinAccessorClientPlayerEntity;
 import net.minecraft.block.*;
+import net.minecraft.block.enums.DoubleBlockHalf;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.ItemStack;
@@ -37,6 +38,7 @@ public class CycleStateGuide extends InteractionGuide {
         // normal block interaction when the offhand holds an item.
         return !player.isSneaking() && playerHasRightItem(player)
                 && needsInteraction(currentState, targetState)
+                && !hasPendingInteraction(currentState, state.blockPos)
                 && canInteractWithoutChangingFacing(currentState, player.getYaw(),
                         ((MixinAccessorClientPlayerEntity) player).getLastYaw());
     }
@@ -63,7 +65,21 @@ public class CycleStateGuide extends InteractionGuide {
         if (state.getBlock() instanceof ComparatorBlock) return ComparatorBlock.MODE;
         if (state.getBlock() instanceof NoteBlock) return NoteBlock.NOTE;
         if (state.getBlock() instanceof DaylightDetectorBlock) return DaylightDetectorBlock.INVERTED;
+        if (state.getBlock() instanceof LeverBlock) return LeverBlock.POWERED;
+        if (state.isOf(Blocks.IRON_DOOR) || state.isOf(Blocks.IRON_TRAPDOOR)) return null;
+        if (state.getBlock() instanceof DoorBlock) return DoorBlock.OPEN;
+        if (state.getBlock() instanceof TrapdoorBlock) return TrapdoorBlock.OPEN;
+        if (state.getBlock() instanceof FenceGateBlock) return FenceGateBlock.OPEN;
         return null;
+    }
+
+    private static BlockPos otherDoorHalf(BlockState state, BlockPos pos) {
+        return state.get(DoorBlock.HALF) == DoubleBlockHalf.LOWER ? pos.up() : pos.down();
+    }
+
+    private static boolean hasPendingInteraction(BlockState actual, BlockPos pos) {
+        return Printer.hasPendingPlacement(pos) || (actual.getBlock() instanceof DoorBlock
+                && Printer.hasPendingPlacement(otherDoorHalf(actual, pos)));
     }
 
     /** Send one dial/toggle step and wait for the corresponding server state. */
@@ -73,7 +89,13 @@ public class CycleStateGuide extends InteractionGuide {
         Property<?> property = tuningProperty(actual);
         if (property == null || !needsInteraction(actual, state.targetState) || player.isSneaking()
                 || ((MixinAccessorClientPlayerEntity) player).getLastSneaking() || client.options.sneakKey.isPressed()
-                || !client.world.getWorldBorder().contains(pos)) return false;
+                || !client.world.getWorldBorder().contains(pos) || hasPendingInteraction(actual, pos)
+                || !canInteractWithoutChangingFacing(actual, player.getYaw(),
+                        ((MixinAccessorClientPlayerEntity) player).getLastYaw())) return false;
+        BlockPos otherPos = actual.getBlock() instanceof DoorBlock ? otherDoorHalf(actual, pos) : null;
+        BlockState otherState = otherPos == null ? null : state.world.getBlockState(otherPos);
+        if (otherState != null && (!otherState.isOf(actual.getBlock())
+                || otherState.get(DoorBlock.HALF) == actual.get(DoorBlock.HALF))) return false;
         Vec3d eye = player.getEyePos();
         Vec3d center = actual.getOutlineShape(client.world, pos).getBoundingBox().getCenter().add(Vec3d.of(pos));
         double reach = Math.min(player.getBlockInteractionRange(), LitematicaMixinMod.PRINTING_RANGE.getDoubleValue());
@@ -88,11 +110,19 @@ public class CycleStateGuide extends InteractionGuide {
         // Do not locally predict a dial step: a neighbor update already in
         // flight must not cause the next scan to send that step twice.
         BlockHitResult checkedHit = hit;
+        BlockState expected = actual.cycle(property);
         client.interactionManager.sendSequencedPacket(client.world, sequence -> {
-            Printer.trackPlacement(pos, actual.cycle(property), ItemStack.EMPTY, sequence);
+            Printer.trackPlacement(pos, expected, ItemStack.EMPTY, sequence);
+            // A single door use changes both halves. Reserve both until their
+            // updates arrive, including when the player stops moving meanwhile.
+            if (otherState != null) {
+                Printer.trackPlacement(otherPos, otherState.with(DoorBlock.OPEN, expected.get(DoorBlock.OPEN)),
+                        ItemStack.EMPTY, sequence);
+            }
             return new PlayerInteractBlockC2SPacket(Hand.MAIN_HAND, checkedHit, sequence);
         });
         Printer.addTimeout(pos);
+        if (otherPos != null) Printer.addTimeout(otherPos);
         player.swingHand(Hand.MAIN_HAND);
         return true;
     }

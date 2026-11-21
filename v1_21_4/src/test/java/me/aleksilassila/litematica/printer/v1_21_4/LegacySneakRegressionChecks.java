@@ -29,6 +29,7 @@ import net.minecraft.util.math.Vec3d;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -64,6 +65,19 @@ public final class LegacySneakRegressionChecks {
                     "Interaction exception left a server sneak lease");
             check(Printer.blockPosTimeout.isEmpty(), "Throwing interaction created a block timeout");
 
+            fixture.reset(false, false);
+            fixture.interaction.throwAfterUse = true;
+            fixture.network.throwOn = ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY;
+            try {
+                fixture.action(true).send(fixture.client, fixture.player);
+                throw new AssertionError("Interaction exception was swallowed during cleanup");
+            } catch (IllegalStateException failure) {
+                check("interaction".equals(failure.getMessage()) && failure.getSuppressed().length == 1
+                                && "network".equals(failure.getSuppressed()[0].getMessage()),
+                        "Failed sneak cleanup masked the interaction failure");
+            }
+            fixture.checkRestored();
+
             for (ClientCommandC2SPacket.Mode failure : new ClientCommandC2SPacket.Mode[]{
                     ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY, ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY}) {
                 fixture.reset(false, false);
@@ -94,6 +108,30 @@ public final class LegacySneakRegressionChecks {
             fixture.checkRestored();
             check(fixture.network.events.isEmpty() && fixture.interaction.calls == 0,
                     "Unsampled user sneak input still sent an interaction");
+
+            fixture.reset(false, false);
+            fixture.interaction.onUse = () -> fixture.client.options.sneakKey.setPressed(true);
+            check(fixture.action(true).send(fixture.client, fixture.player), "Interaction with mid-use sneak failed");
+            check(fixture.network.events.equals(List.of("PRESS_SHIFT_KEY", "USE")) && fixture.network.serverSneaking
+                            && fixture.player.input.playerInput == fixture.original,
+                    "Cleanup released newly held user sneak or lost the original input");
+            fixture.client.options.sneakKey.setPressed(false);
+            Method sendSneakingPacket = ClientPlayerEntity.class.getDeclaredMethod("sendSneakingPacket");
+            sendSneakingPacket.setAccessible(true);
+            sendSneakingPacket.invoke(fixture.player);
+            check(!fixture.network.serverSneaking && fixture.network.events.getLast().equals("RELEASE_SHIFT_KEY"),
+                    "Vanilla failed to release a sneak key tapped between input samples");
+
+            fixture.reset(false, false);
+            fixture.interaction.onUse = () -> fixture.client.player = null;
+            try {
+                check(fixture.action(true).send(fixture.client, fixture.player), "Interaction with a player handoff failed");
+                check(fixture.network.events.equals(List.of("PRESS_SHIFT_KEY", "USE"))
+                                && fixture.player.input.playerInput == fixture.original,
+                        "Cleanup sent to a stale player or lost the original input");
+            } finally {
+                fixture.client.player = fixture.player;
+            }
 
             fixture.reset(false, false);
             while (Printer.tryAcquirePlacementPacket()) {}
@@ -165,6 +203,7 @@ public final class LegacySneakRegressionChecks {
         private void reset(boolean sneaking, boolean key) throws Exception {
             original = new PlayerInput(true, false, true, false, true, sneaking, true);
             player.input.playerInput = original;
+            set(ClientPlayerEntity.class, player, "lastSneaking", sneaking);
             player.input.movementSideways = 0.3F;
             player.input.movementForward = 0.3F;
             originalKey = key;
@@ -174,6 +213,7 @@ public final class LegacySneakRegressionChecks {
             network.throwOn = null;
             interaction.result = ActionResult.SUCCESS;
             interaction.throwAfterUse = false;
+            interaction.onUse = null;
             interaction.calls = 0;
             interaction.observedSneaking = false;
             interaction.observedServerSneaking = false;
@@ -226,6 +266,7 @@ public final class LegacySneakRegressionChecks {
         private FixtureNetwork network;
         private ActionResult result;
         private boolean throwAfterUse;
+        private Runnable onUse;
         private int calls;
         private boolean observedSneaking;
         private boolean observedServerSneaking;
@@ -235,6 +276,7 @@ public final class LegacySneakRegressionChecks {
             observedSneaking = player.isSneaking();
             observedServerSneaking = network.serverSneaking;
             network.sendPacket(new PlayerInteractBlockC2SPacket(hand, hit, 1));
+            if (onUse != null) onUse.run();
             if (throwAfterUse) throw new IllegalStateException("interaction");
             return result;
         }

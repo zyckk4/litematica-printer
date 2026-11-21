@@ -5,7 +5,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 connecting directly to 2b2t, with native placement and movement handling. No
 client-side Via mod is required.
 
-Version: **3.4.6**. The `1.21.4` branch ports the native printer logic from the
+Version: **3.4.7**. The `1.21.4` branch ports the native printer logic from the
 `1.21.11` branch, preserving its placement, movement and interaction behavior for
 blocks supported by Minecraft 1.21.4. The earlier 1.21.4 implementation remains
 available in Git history; the `1.21.11` branch targets the newer client separately.
@@ -16,6 +16,7 @@ available in Git history; the `1.21.11` branch targets the newer client separate
   and world movement direction.
 - Place throughout the configured range using native airplace and placement
   simulation, with support and collision checks.
+- Print the first row outside the world border by clicking existing inside supports.
 - Handle directional blocks, attachments, staged double chests and double slabs.
 - Preserve each torch's floor or wall attachment, including with rotation ignored;
   recheck the actual torch item, sent angle and support before placement.
@@ -36,7 +37,7 @@ Requirements:
 - [MaLiLib 0.23.5](https://modrinth.com/mod/malilib/version/ifi4uRpL).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.6-mc1.21.4.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.7-mc1.21.4.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -91,9 +92,28 @@ budget. Lower the burst or increase the window if interactions are rejected.
 
 ## Placement limits
 
+Native placement can reach one block outside each side of the world border when
+the directly adjacent inside cell already contains a usable, non-interactive
+support. It sends an outward-face click on that inside block; no torch or other
+temporary helper is placed. This route works with moving, stationary and
+rotation-independent native placement. It never clicks an outside block or
+extends to a second row or a diagonally outside corner. Missing or unsuitable
+inside supports are skipped.
+
+For these border placements, the outward face is allowed even with
+`printerStrictBlockFaceCheck` or `printerRaycastStrictBlockHit` enabled.
+`printerRaycast` still checks for intervening blocks. Reach, collision, fluid
+protection and item placement rules still apply, and the border and support are
+rechecked immediately before sending. Server acceptance of outward-face clicks
+is required. Further interactions with outside blocks, such as repeater tuning,
+remain restricted by the server's border checks.
+
 With `printerNativeMoving` enabled, ordinary placements take priority. While moving,
 the printer can also lay supported rails, adjust repeaters, comparators, note
-blocks and daylight detectors, and waterlog eligible targets. Leave an empty inventory slot for tuning
+blocks, daylight detectors, levers and manually operable doors, trapdoors and
+fence gates, and waterlog eligible targets. Door halves share a pending toggle
+until their server updates arrive; fence gates wait for an angle that preserves
+their facing. Leave an empty inventory slot for tuning
 and release sneak for tuning and bucket use. Rail connections depend on the
 support and neighboring tracks already in the world. Stand still for other
 specialized guides and precise sign rotations. Adjacent independent single
@@ -127,7 +147,7 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.6
+## Remaining issues in 3.4.7
 
 | Area | Trigger and observed code behavior |
 | --- | --- |
@@ -171,6 +191,10 @@ Output is under `v1_21_4/build/libs/`. Install the remapped printer JAR; the
 `-sources.jar` is for development. `check` and `build` run the native regression
 harness under Fabric Knot. These checks verify code and loading behavior;
 gameplay and server acceptance require a client test.
+
+Run just the state-interaction and temporary-sneak regressions with
+`./gradlew :v1_21_4:nativeRegression --args=--state-interactions`
+(use `.\gradlew.bat` on Windows).
 
 After committing the reviewed files and building from a clean working tree,
 run `python scripts/prepare_release.py` with Python 3.11 or newer to create local

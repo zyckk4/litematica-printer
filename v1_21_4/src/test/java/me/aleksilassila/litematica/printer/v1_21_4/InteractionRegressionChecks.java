@@ -1,5 +1,6 @@
 package me.aleksilassila.litematica.printer.v1_21_4;
 
+import com.mojang.serialization.Lifecycle;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import me.aleksilassila.litematica.printer.v1_21_4.actions.Action;
@@ -32,10 +33,17 @@ import net.minecraft.fluid.FluidState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.registry.BuiltinRegistries;
+import net.minecraft.registry.DynamicRegistryManager;
+import net.minecraft.registry.Registry;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.RegistryKeys;
+import net.minecraft.registry.RegistryWrapper;
+import net.minecraft.registry.SimpleRegistry;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -51,7 +59,9 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Difficulty;
 import net.minecraft.world.RaycastContext;
+import net.minecraft.world.World;
 import net.minecraft.world.dimension.DimensionType;
 import net.minecraft.world.dimension.DimensionTypes;
 import net.minecraft.world.border.WorldBorder;
@@ -248,8 +258,11 @@ public final class InteractionRegressionChecks {
         FixtureWorld world = (FixtureWorld) fixture.unsafe.allocateInstance(FixtureWorld.class);
         world.blocks = new HashMap<>();
         world.border = new WorldBorder();
-        var dimensions = BuiltinRegistries.createWrapperLookup().getOrThrow(RegistryKeys.DIMENSION_TYPE);
-        world.dimension = dimensions.getOrThrow(DimensionTypes.OVERWORLD).value();
+        var builtins = BuiltinRegistries.createWrapperLookup();
+        var dimensions = builtins.getOrThrow(RegistryKeys.DIMENSION_TYPE);
+        var overworld = dimensions.getOrThrow(DimensionTypes.OVERWORLD);
+        world.dimension = overworld.value();
+        initializeFixtureRegistries(world, builtins, overworld);
         set(net.minecraft.world.World.class, world, "isClient", true);
         set(ClientWorld.class, world, "pendingUpdateManager", new PendingUpdateManager());
         set(Entity.class, player, "world", world);
@@ -609,11 +622,123 @@ public final class InteractionRegressionChecks {
             PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(true);
             check(!printer.onGameTick(), "Moving interaction bypassed StopOnMovement");
             checkRailConnections(world, schematic, target);
+            checkNativeBorderPackets(fixture, world, schematic, limiter, printer);
         } finally {
             LitematicaMixinMod.PRINT_MODE.setBooleanValue(printing);
             PrinterConfig.PRINTER_NATIVE_MOVING.setBooleanValue(nativeMoving);
             PrinterConfig.PRINTER_NATIVE_OMNI.setBooleanValue(nativeOmni);
             PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(stop);
+        }
+    }
+
+    private static void checkNativeBorderPackets(Fixture fixture, FixtureWorld world, FixtureSchematic schematic,
+                                                  PlacementRateLimiter limiter, Printer printer) throws Exception {
+        var player = fixture.player;
+        BlockPos target = schematic.target;
+        BlockPos support = target.north();
+        BlockPos secondRow = target.south();
+        BlockState stone = Blocks.STONE.getDefaultState();
+        WorldBorder previousBorder = world.border;
+        Map<BlockPos, BlockState> previousBlocks = new HashMap<>(world.blocks);
+        BlockState previousDesired = schematic.desired;
+        Map<BlockPos, BlockState> previousNeighbors = schematic.neighbors;
+        List<ItemStack> previousInventory = player.inventory.main.stream().map(ItemStack::copy).toList();
+        int previousSlot = player.inventory.selectedSlot;
+        boolean stop = PrinterConfig.STOP_ON_MOVEMENT.getBooleanValue();
+        boolean strictFace = PrinterConfig.STRICT_BLOCK_FACE_CHECK.getBooleanValue();
+        boolean raycast = PrinterConfig.RAYCAST.getBooleanValue();
+        boolean strictHit = PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.getBooleanValue();
+        boolean grimAirplace = PrinterConfig.PRINTER_NATIVE_GRIM_AIRPLACE.getBooleanValue();
+        boolean grimRotation = PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue();
+        try {
+            PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(false);
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(true);
+            PrinterConfig.RAYCAST.setBooleanValue(true);
+            PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.setBooleanValue(true);
+            PrinterConfig.PRINTER_NATIVE_GRIM_AIRPLACE.setBooleanValue(true);
+            PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(false);
+            world.border = new WorldBorder();
+            world.border.setCenter(0, target.getZ() - 3);
+            world.border.setSize(6);
+            world.blocks.clear();
+            world.blocks.put(support, stone);
+            schematic.desired = stone;
+            schematic.neighbors = Map.of();
+            fill(player, ItemStack.EMPTY);
+            player.inventory.main.set(2, new ItemStack(Items.STONE, 64));
+            Printer.inventoryManager.reset();
+            limiter.reset();
+            check(world.border.contains(support) && !world.border.contains(target), "Border packet fixture is not across the border");
+
+            int packets = fixture.network.blockPackets.size();
+            int swaps = fixture.network.handSwaps;
+            check(schedule(printer), "First outside row did not reach native scheduling");
+            check(fixture.network.blockPackets.size() == packets && !Printer.hasPendingPlacement(target),
+                    "Border placement sent or became pending before movement flush");
+            MovementHandler.onMovementSent(player);
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == packets + 1, "Border placement did not send exactly one block packet");
+            PlayerInteractBlockC2SPacket packet = fixture.network.blockPackets.get(packets);
+            check(packet.getBlockHitResult().getBlockPos().equals(support)
+                            && packet.getBlockHitResult().getSide() == Direction.SOUTH,
+                    "Border packet did not click the inside support's outward face");
+            check(packet.getHand() == Hand.MAIN_HAND && packet.getSequence() > 0 && fixture.network.handSwaps == swaps,
+                    "Supported border placement incorrectly used the airplace hand-swap path");
+            check(Printer.hasPendingPlacement(target) && !Printer.hasPendingPlacement(support),
+                    "Border pending state tracked the clicked support instead of the outside target");
+            check(world.getBlockState(target).isAir(), "Border send inserted an unconfirmed client block");
+            Printer.confirmNativePlacement(support, stone);
+            check(Printer.hasPendingPlacement(target), "An inside support update confirmed the outside target");
+            world.blocks.put(target, stone);
+            Printer.confirmNativePlacement(target, stone);
+            check(!Printer.hasPendingPlacement(target), "Outside target update did not clear its pending placement");
+
+            world.blocks.remove(target);
+            packets = fixture.network.blockPackets.size();
+            check(schedule(printer), "Border target did not prepare for support removal check");
+            world.blocks.remove(support);
+            MovementHandler.onMovementSent(player);
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == packets && !Printer.hasPendingPlacement(target),
+                    "Removed inside support still produced a packet or pending target");
+
+            world.blocks.put(support, stone);
+            check(schedule(printer), "Border target did not prepare for border shrink check");
+            world.border.setSize(4);
+            MovementHandler.onMovementSent(player);
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == packets && !Printer.hasPendingPlacement(target),
+                    "Shrunken border still allowed the previously prepared outside placement");
+
+            world.border.setSize(6);
+            world.blocks.put(target, stone);
+            schematic.target = secondRow;
+            check(!schedule(printer), "Native printer scheduled the second outside row using an outside support");
+            printer.flushNativePlacements();
+            check(fixture.network.blockPackets.size() == packets && !Printer.hasPendingPlacement(secondRow),
+                    "Second outside row produced a packet or pending target");
+        } finally {
+            // Discard any prepared action if an assertion interrupted the scenario.
+            world.blocks.clear();
+            world.border.setSize(1);
+            printer.flushNativePlacements();
+            Printer.confirmNativePlacement(target, stone);
+            Printer.confirmNativePlacement(secondRow, stone);
+            world.border = previousBorder;
+            world.blocks.putAll(previousBlocks);
+            schematic.target = target;
+            schematic.desired = previousDesired;
+            schematic.neighbors = previousNeighbors;
+            for (int i = 0; i < previousInventory.size(); i++) player.inventory.main.set(i, previousInventory.get(i));
+            player.inventory.selectedSlot = previousSlot;
+            Printer.inventoryManager.reset();
+            PrinterConfig.STOP_ON_MOVEMENT.setBooleanValue(stop);
+            PrinterConfig.STRICT_BLOCK_FACE_CHECK.setBooleanValue(strictFace);
+            PrinterConfig.RAYCAST.setBooleanValue(raycast);
+            PrinterConfig.RAYCAST_STRICT_BLOCK_HIT.setBooleanValue(strictHit);
+            PrinterConfig.PRINTER_NATIVE_GRIM_AIRPLACE.setBooleanValue(grimAirplace);
+            PrinterConfig.PRINTER_GRIM_ROTATION.setBooleanValue(grimRotation);
+            limiter.reset();
         }
     }
 
@@ -743,6 +868,12 @@ public final class InteractionRegressionChecks {
             return pos.equals(target) ? desired : neighbors == null ? Blocks.AIR.getDefaultState()
                     : neighbors.getOrDefault(pos, Blocks.AIR.getDefaultState());
         }
+        @Override public boolean setBlockState(BlockPos pos, BlockState state, int flags) {
+            // MaterialCache reapplies the queried state before picking the item.
+            // This fixture already supplies that state through getBlockState.
+            check(getBlockState(pos) == state, "Unexpected write to the fixture schematic");
+            return false;
+        }
     }
 
     private static final class FixtureWorld extends ClientWorld {
@@ -803,9 +934,12 @@ public final class InteractionRegressionChecks {
         @Override public net.minecraft.client.network.PlayerListEntry getPlayerListEntry(java.util.UUID uuid) { return null; }
         private List<PlayerInteractItemC2SPacket> uses;
         private List<PlayerInteractBlockC2SPacket> blockPackets;
+        private int handSwaps;
         @Override public void sendPacket(Packet<?> packet) {
             if (packet instanceof PlayerInteractItemC2SPacket use) uses.add(use);
             if (packet instanceof PlayerInteractBlockC2SPacket use && blockPackets != null) blockPackets.add(use);
+            if (packet instanceof PlayerActionC2SPacket action
+                    && action.getAction() == PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND) handSwaps++;
         }
     }
 
@@ -836,6 +970,25 @@ public final class InteractionRegressionChecks {
             blockUses++;
             return ActionResult.SUCCESS;
         }
+    }
+
+    static void initializeFixtureRegistries(ClientWorld world, RegistryWrapper.WrapperLookup builtins,
+                                            RegistryEntry<DimensionType> dimension) throws Exception {
+        // Litematica's material cache constructs a real temporary schematic world.
+        set(World.class, world, "registryManager", new DynamicRegistryManager.ImmutableImpl(List.of(
+                copyBuiltinRegistry(builtins, RegistryKeys.DAMAGE_TYPE),
+                copyBuiltinRegistry(builtins, RegistryKeys.BIOME),
+                copyBuiltinRegistry(builtins, RegistryKeys.DIMENSION_TYPE))));
+        set(World.class, world, "dimensionEntry", dimension);
+        set(World.class, world, "properties", new ClientWorld.Properties(Difficulty.NORMAL, false, false));
+    }
+
+    private static <T> Registry<T> copyBuiltinRegistry(RegistryWrapper.WrapperLookup builtins,
+                                                        RegistryKey<Registry<T>> key) {
+        var registry = new SimpleRegistry<T>(key, Lifecycle.stable());
+        builtins.getOrThrow(key).streamEntries()
+                .forEach(entry -> Registry.register(registry, entry.registryKey(), entry.value()));
+        return registry.freeze();
     }
 
     private static void set(Class<?> owner, Object target, String name, Object value) throws Exception {
