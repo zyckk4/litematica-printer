@@ -44,7 +44,7 @@ public class PrinterConfig {
     public static final ConfigBoolean PRINTER_GRIM_ROTATION = new ConfigBoolean("printerGrimRotate", true, "Allows you to place blocks anywhere while walking or using baritone.");
     public static final ConfigBoolean STOP_ON_MOVEMENT = new ConfigBoolean("printerStopOnMovement", false, "Stop the printer if the player velocity is to high.");
     public static final ConfigInteger INVENTORY_DELAY = new ConfigInteger("printerInventoryDelay", 10, 0, 100,
-            "Client ticks to wait before using a refilled slot or refilling again. 0 still waits at least one tick.");
+            "Client ticks before requesting inventory recovery. Both slots must be confirmed by the server. The recovery window is at least 10 ticks.");
     public static final ConfigOptionList PRINTER_INVENTORY_MANAGEMENT_MODE = new ConfigOptionList("printerInventoryManagementMode", InventoryManagementModeEnum.LEAST_USED, "Inventory management mode. Rolling = cycle through the hotbar, Least Used = use the least used slot in the hotbar.");
     public static final ConfigBoolean RAYCAST = new ConfigBoolean("printerRaycast", false, "Raycast the block to place to check if it is obstructed by another block. Most anti cheat don't check for this.");
     public static final ConfigBoolean NO_PLACEMENT_CACHE = new ConfigBoolean("printerNoPlacementCache", false, "Disable the placement cache. This may cause more lag.");

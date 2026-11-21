@@ -5,15 +5,20 @@ import fi.dy.masa.litematica.materials.MaterialCache;
 import fi.dy.masa.litematica.util.InventoryUtils;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import fi.dy.masa.malilib.config.options.ConfigString;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
 import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
+import net.minecraft.network.packet.c2s.play.ClientStatusC2SPacket;
 import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.screen.sync.ItemStackHash;
 import net.minecraft.util.collection.DefaultedList;
 import net.minecraft.util.math.BlockPos;
 
@@ -24,13 +29,17 @@ import java.util.List;
 
 public class InventoryManager {
     private static final List<Integer> USABLE_SLOTS = new ArrayList<>();
-    int delay = 0;
+    private static final int REVISION_MASK = 0x7fff;
+    private static final int HALF_REVISION_RANGE = 0x4000;
+    private static final int MIN_RESPONSE_TICKS = 10;
     private final MinecraftClient mc = MinecraftClient.getInstance();
     private final Deque<Integer> rollingSlots = new ArrayDeque<>();
     private final Deque<Integer> lastUsedSlots = new ArrayDeque<>();
     private static InventoryManager instance;
     private ClientPlayerEntity inventoryOwner;
+    private ClientPlayNetworkHandler inventoryConnection;
     private PendingSwap pendingSwap;
+    private int refillBackoff;
 
     private InventoryManager() {
         // The config callback is not guaranteed to fire on the first launch.
@@ -67,58 +76,252 @@ public class InventoryManager {
     }
 
     public void reset() {
-        delay = 0;
         pendingSwap = null;
+        refillBackoff = 0;
+    }
+
+    void onPrinterContextChanged() {
+        if (mc == null || mc.player == null) return;
+        ensureInventoryOwner(mc.player);
+        if (pendingSwap != null) pendingSwap.interrupt();
     }
 
     public boolean tick() {
-        if (mc.player == null || mc.interactionManager == null) {
+        if (mc.player == null) {
             inventoryOwner = null;
+            inventoryConnection = null;
             reset();
             return false;
         }
         ensureInventoryOwner(mc.player);
-        // Give the first eligible tick a chance to inspect both slots before
-        // releasing a swap whose result no longer matches our prediction.
-        if (delay == 0) pendingSwap = null;
-        else delay--;
+        if (refillBackoff > 0) refillBackoff--;
+        PendingSwap swap = pendingSwap;
+        if (swap == null) return false;
+        if (!canExchange(mc.player)) {
+            swap.interrupt();
+            return false;
+        }
+        if (swap.ticksRemaining > 0 && --swap.ticksRemaining > 0) return false;
+        if (swap.recovery == Recovery.NONE) {
+            startRecovery(swap);
+        } else if (!swap.warned) {
+            swap.warned = true;
+            Printer.logger.warn("Printer is waiting for an authoritative inventory refresh. Other hotbar slots are still available.");
+        }
 
         return false;
     }
 
     private boolean swapToHotbar(ClientPlayerEntity player, ItemStack stack, int nextSlot) {
-        if (nextSlot == -1) return false;
+        ClientPlayNetworkHandler network = mc.getNetworkHandler();
+        if (nextSlot == -1 || network == null || !canExchange(player) || pendingSwap != null || refillBackoff > 0) return false;
         int slot = getBestInventorySlotWithItem(player, stack);
         if (slot == -1) return false;
         PlayerInventory inventory = player.getInventory();
-        PendingSwap swap = new PendingSwap(slot, nextSlot,
-                inventory.getStack(nextSlot).copy(), inventory.getStack(slot).copy());
+        ItemStack source = inventory.getStack(slot);
+        ItemStack destination = inventory.getStack(nextSlot);
+        if (ItemStack.areEqual(source, destination)) return false;
+        PlayerScreenHandler handler = player.playerScreenHandler;
+        pendingSwap = new PendingSwap(handler, slot, nextSlot, destination.copy(), source.copy());
+        // Leave the client inventory untouched so the server publishes both changed slots.
+        sendSwapClick(network, handler.syncId, handler.getRevision(), slot, nextSlot);
+        recordRefillSlot(nextSlot);
         if (PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
             System.out.println("Swapping item from inventory: " + slot + " into hotbar -> " + nextSlot);
         }
-        if (!swapAway(slot, nextSlot, player.playerScreenHandler)) return false;
-        pendingSwap = swap;
-        recordRefillSlot(nextSlot);
-        // A successful vanilla click can go unacknowledged. Allow time for
-        // corrections before inspecting the slots affected by the click.
-        delay = Math.max(1, PrinterConfig.INVENTORY_DELAY.getIntegerValue());
         return true;
     }
 
-    private record PendingSwap(int sourceSlot, int hotbarSlot, ItemStack expectedSource, ItemStack expectedHotbar) {
+    public void onAuthoritativeSlot(int syncId, int revision, int screenSlot) {
+        PendingSwap swap = observeRevision(syncId, revision);
+        if (swap == null) return;
+        PlayerInventory inventory = inventoryOwner.getInventory();
+        if (screenSlot == swap.sourceSlot) {
+            ItemStack actual = inventory.getStack(swap.sourceSlot);
+            swap.sourcePublished = ItemStack.areEqual(actual, swap.expectedSource);
+            if (swap.readbackSource != null) swap.readbackSource = actual.copy();
+        } else if (screenSlot == swap.hotbarScreenSlot()) {
+            ItemStack actual = inventory.getStack(swap.hotbarSlot);
+            swap.hotbarPublished = ItemStack.areEqual(actual, swap.expectedHotbar);
+            if (swap.readbackHotbar != null) swap.readbackHotbar = actual.copy();
+        }
+        finishIfConfirmed(swap);
+    }
+
+    public void onAuthoritativeInventory(int syncId, int revision) {
+        PendingSwap swap = observeRevision(syncId, revision);
+        if (swap == null) return;
+        PlayerInventory inventory = inventoryOwner.getInventory();
+        ItemStack source = inventory.getStack(swap.sourceSlot);
+        ItemStack hotbar = inventory.getStack(swap.hotbarSlot);
+        swap.sourcePublished = ItemStack.areEqual(source, swap.expectedSource);
+        swap.hotbarPublished = ItemStack.areEqual(hotbar, swap.expectedHotbar);
+        if (swap.recovery == Recovery.REFRESHING && !swap.refreshInvalidated) {
+            swap.readbackSource = source.copy();
+            swap.readbackHotbar = hotbar.copy();
+        }
+        finishIfConfirmed(swap);
+    }
+
+    /** A full inventory packet must cover every slot before it can attest to both endpoints. */
+    public void onAuthoritativeInventory(int syncId, int revision, int slotCount) {
+        if (pendingSwap != null && pendingSwap.handler.slots.size() == slotCount) {
+            onAuthoritativeInventory(syncId, revision);
+        }
+    }
+
+    private PendingSwap observeRevision(int syncId, int revision) {
+        ClientPlayerEntity player = mc.player;
+        PendingSwap swap = unsettledSwap(player);
+        if (swap == null || swap.handler.syncId != syncId) return null;
+        if (!canExchange(player)) {
+            swap.interrupt();
+            return null;
+        }
+        int distance = (revision - swap.revision) & REVISION_MASK;
+        if (distance == 0 || distance >= HALF_REVISION_RANGE) return null;
+        swap.revision = revision;
+        return swap;
+    }
+
+    private void finishIfConfirmed(PendingSwap swap) {
+        if (swap.recovery == Recovery.NONE && swap.confirmed(inventoryOwner.getInventory())) {
+            pendingSwap = null;
+        }
+    }
+
+    private void startRecovery(PendingSwap swap) {
+        ClientPlayNetworkHandler network = mc.getNetworkHandler();
+        if (network == null) return;
+        swap.recovery = Recovery.DRAINING;
+        swap.ticksRemaining = responseTicks();
+        sendInventoryFence(network);
+    }
+
+    private void requestReadback(PendingSwap swap, ClientPlayNetworkHandler network) {
+        swap.recovery = Recovery.REFRESHING;
+        swap.refreshInvalidated = false;
+        swap.ticksRemaining = responseTicks();
+        // Clicking a hotbar slot with its own number does not move items. A stale revision asks
+        // vanilla for a complete snapshot. The following stats response is a main-thread fence.
+        sendSwapClick(network, swap.handler.syncId, swap.handler.getRevision() ^ HALF_REVISION_RANGE,
+                swap.hotbarScreenSlot(), swap.hotbarSlot);
+        sendInventoryFence(network);
+    }
+
+    private static void sendInventoryFence(ClientPlayNetworkHandler network) {
+        network.sendPacket(new ClientStatusC2SPacket(ClientStatusC2SPacket.Mode.REQUEST_STATS));
+    }
+
+    public void onInventoryReadbackBarrier() {
+        ClientPlayerEntity player = mc.player;
+        PendingSwap swap = unsettledSwap(player);
+        if (swap == null || swap.recovery == Recovery.NONE) return;
+        if (!canExchange(player)) {
+            swap.interrupt();
+            swap.recovery = Recovery.NONE;
+            return;
+        }
+        PlayerInventory inventory = inventoryOwner.getInventory();
+        if (swap.recovery == Recovery.DRAINING) {
+            // The server has already handled the original click. Any snapshot from before it
+            // preceded this response, so it cannot be mistaken for the recovery snapshot.
+            if (swap.confirmed(inventory)) pendingSwap = null;
+            else if (mc.getNetworkHandler() != null) requestReadback(swap, mc.getNetworkHandler());
+            return;
+        }
+        if (!swap.matchesReadback(inventory)) {
+            if (swap.refreshInvalidated) {
+                swap.recovery = Recovery.NONE;
+                swap.ticksRemaining = responseTicks();
+            }
+            return;
+        }
+        if (!swap.matches(inventory)) refillBackoff = responseTicks();
+        // Replan from the server snapshot. This never retransmits the original exchange.
+        pendingSwap = null;
+    }
+
+    public boolean tracksConnection(ClientPlayNetworkHandler network) {
+        return pendingSwap != null && mc.getNetworkHandler() == network;
+    }
+
+    private static int responseTicks() {
+        return Math.max(MIN_RESPONSE_TICKS, PrinterConfig.INVENTORY_DELAY.getIntegerValue());
+    }
+
+    private static void sendSwapClick(ClientPlayNetworkHandler network, int syncId, int revision,
+                                      int screenSlot, int hotbarSlot) {
+        network.sendPacket(new ClickSlotC2SPacket(syncId, revision, (short) screenSlot, (byte) hotbarSlot,
+                SlotActionType.SWAP, Int2ObjectMaps.emptyMap(), ItemStackHash.EMPTY));
+    }
+
+    private PendingSwap unsettledSwap(ClientPlayerEntity player) {
+        return player != null && player == inventoryOwner && pendingSwap != null
+                && player.playerScreenHandler == pendingSwap.handler ? pendingSwap : null;
+    }
+
+    private enum Recovery { NONE, DRAINING, REFRESHING }
+
+    private static final class PendingSwap {
+        PlayerScreenHandler handler;
+        final int sourceSlot;
+        final int hotbarSlot;
+        final ItemStack expectedSource;
+        final ItemStack expectedHotbar;
+        int revision;
+        int ticksRemaining = responseTicks();
+        boolean sourcePublished;
+        boolean hotbarPublished;
+        boolean interrupted;
+        boolean refreshInvalidated;
+        Recovery recovery = Recovery.NONE;
+        ItemStack readbackSource;
+        ItemStack readbackHotbar;
+        boolean warned;
+
+        PendingSwap(PlayerScreenHandler handler, int sourceSlot, int hotbarSlot, ItemStack expectedSource, ItemStack expectedHotbar) {
+            this.handler = handler;
+            this.sourceSlot = sourceSlot;
+            this.hotbarSlot = hotbarSlot;
+            this.expectedSource = expectedSource;
+            this.expectedHotbar = expectedHotbar;
+            revision = handler.getRevision();
+        }
+
+        int hotbarScreenSlot() {
+            return PlayerScreenHandler.HOTBAR_START + hotbarSlot;
+        }
+
         boolean matches(PlayerInventory inventory) {
             return ItemStack.areEqual(inventory.getStack(sourceSlot), expectedSource)
                     && ItemStack.areEqual(inventory.getStack(hotbarSlot), expectedHotbar);
         }
-    }
 
-    private PendingSwap unsettledSwap(ClientPlayerEntity player) {
-        if (inventoryOwner != player || pendingSwap == null) return null;
-        return delay > 0 || !pendingSwap.matches(player.getInventory()) ? pendingSwap : null;
-    }
+        boolean confirmed(PlayerInventory inventory) {
+            return !interrupted && sourcePublished && hotbarPublished && matches(inventory);
+        }
 
-    private void releaseMatchingSwap(ClientPlayerEntity player) {
-        if (pendingSwap != null && unsettledSwap(player) == null) pendingSwap = null;
+        boolean matchesReadback(PlayerInventory inventory) {
+            return readbackSource != null && ItemStack.areEqual(inventory.getStack(sourceSlot), readbackSource)
+                    && ItemStack.areEqual(inventory.getStack(hotbarSlot), readbackHotbar);
+        }
+
+        void interrupt() {
+            if (!interrupted) ticksRemaining = responseTicks();
+            interrupted = true;
+            sourcePublished = false;
+            hotbarPublished = false;
+            if (recovery == Recovery.REFRESHING) refreshInvalidated = true;
+            readbackSource = null;
+            readbackHotbar = null;
+        }
+
+        void rebind(PlayerScreenHandler newHandler) {
+            handler = newHandler;
+            revision = newHandler.getRevision();
+            interrupt();
+        }
     }
 
     public void pickSlot(WorldSchematic world, ClientPlayerEntity player, BlockPos pos) {
@@ -129,6 +332,8 @@ public class InventoryManager {
         BlockState state = world.getBlockState(pos);
         ItemStack stack = MaterialCache.getInstance().getRequiredBuildItemForState(state, world, pos);
         int slot = inv.getSlotWithStack(stack);
+        PendingSwap swap = unsettledSwap(player);
+        if (swap != null && (slot < 0 || slot > 8 || slot == swap.hotbarSlot)) return;
         boolean shouldPick = slot > 8;
         if (slot != -1 && !shouldPick) {
             selectHotbarSlot(player, slot);
@@ -205,7 +410,6 @@ public class InventoryManager {
         ClientPlayerEntity player = mc.player;
         if (stack == null || !canAccessInventory(player)) return false;
         ensureInventoryOwner(player);
-        releaseMatchingSwap(player);
         int slot = findReadyHotbarSlot(player, stack, false);
         if (slot == -1) return false;
         selectReadySlot(player, slot);
@@ -219,7 +423,7 @@ public class InventoryManager {
 
     public boolean canStartRefill() {
         ClientPlayerEntity player = mc.player;
-        if (!canAccessInventory(player) || unsettledSwap(player) != null) return false;
+        if (!canExchange(player) || unsettledSwap(player) != null || refillBackoff > 0) return false;
         if (player.getAbilities().creativeMode) return firstCreativeRefillSlot() != -1;
         return findRefillSlot(player, true, List.of()) != -1;
     }
@@ -233,7 +437,12 @@ public class InventoryManager {
     }
 
     private boolean canStageRefill(ClientPlayerEntity player) {
-        return canAccessInventory(player) && !player.getAbilities().creativeMode && unsettledSwap(player) == null;
+        return canExchange(player) && !player.getAbilities().creativeMode
+                && unsettledSwap(player) == null && refillBackoff == 0;
+    }
+
+    private boolean canExchange(ClientPlayerEntity player) {
+        return canAccessInventory(player) && !(mc.currentScreen instanceof HandledScreen<?>);
     }
 
     private boolean canAccessInventory(ClientPlayerEntity player) {
@@ -251,13 +460,12 @@ public class InventoryManager {
         ClientPlayerEntity player = mc.player;
         if (itemStack == null || !canAccessInventory(player)) return false;
         ensureInventoryOwner(player);
-        releaseMatchingSwap(player);
         int hotbarSlot = findReadyHotbarSlot(player, itemStack, false);
         if (hotbarSlot != -1) {
             selectReadySlot(player, hotbarSlot);
             return true;
         }
-        if (unsettledSwap(player) != null) return false;
+        if (unsettledSwap(player) != null || refillBackoff > 0) return false;
 
         // Empty-hand interactions may use an existing empty slot. Never erase
         // a stack to manufacture an empty hand, including in creative mode.
@@ -281,10 +489,16 @@ public class InventoryManager {
     }
 
     private void ensureInventoryOwner(ClientPlayerEntity player) {
-        if (inventoryOwner != player) {
-            inventoryOwner = player;
+        ClientPlayNetworkHandler network = mc.getNetworkHandler();
+        if (inventoryConnection != network) {
+            inventoryConnection = network;
             reset();
+        } else if (inventoryOwner != player && pendingSwap != null) {
+            // Respawn and dimension changes can replace the player on the same ordered connection.
+            // Keep the slots reserved until a refresh from the new player handler is fenced.
+            pendingSwap.rebind(player.playerScreenHandler);
         }
+        inventoryOwner = player;
     }
 
     private void selectHotbarSlot(ClientPlayerEntity player, int slot) {
@@ -292,19 +506,6 @@ public class InventoryManager {
         // Use vanilla's tracker so raw sequenced placements cannot precede the
         // selected-slot update, and normal movement does not send duplicate swaps.
         mc.interactionManager.syncSelectedSlot();
-    }
-
-    public boolean swapAway(int inventorySlot, int hotbarSlot, PlayerScreenHandler screenHandler) {
-        ClientPlayNetworkHandler networkHandler = mc.getNetworkHandler();
-        if (mc.player == null || mc.interactionManager == null || networkHandler == null
-                || screenHandler != mc.player.currentScreenHandler
-                || !screenHandler.getCursorStack().isEmpty()
-                || inventorySlot < 0 || inventorySlot >= 36
-                || !PlayerInventory.isValidHotbarIndex(hotbarSlot)) return false;
-
-        int screenSlot = inventorySlot < 9 ? PlayerScreenHandler.HOTBAR_START + inventorySlot : inventorySlot;
-        mc.interactionManager.clickSlot(screenHandler.syncId, screenSlot, hotbarSlot, SlotActionType.SWAP, mc.player);
-        return true;
     }
 
     private int findRefillSlot(ClientPlayerEntity player, boolean allowSelected, List<ItemStack> keepInHotbar) {
@@ -379,7 +580,7 @@ public class InventoryManager {
 
     private int findReadyHotbarSlot(ClientPlayerEntity player, ItemStack itemStack, boolean requireAvailableCount) {
         PendingSwap pending = unsettledSwap(player);
-        int pendingSlot = pending == null ? -1 : pending.hotbarSlot();
+        int pendingSlot = pending == null ? -1 : pending.hotbarSlot;
         int pendingUseCount = itemStack.isEmpty() || player.getAbilities().creativeMode
                 ? 0 : Printer.pendingItemCount(itemStack);
         return findHotbarSlot(player.getInventory(), itemStack, pendingSlot, pendingUseCount, requireAvailableCount);

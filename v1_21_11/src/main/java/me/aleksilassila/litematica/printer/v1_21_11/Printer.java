@@ -73,7 +73,7 @@ public class Printer {
         pendingPlacements.clear();
         blockPosTimeout.clear();
         placementRate.reset();
-        inventoryManager.reset();
+        inventoryManager.onPrinterContextChanged();
         MovementHandler.clearRotation();
         this.actionHandler = new ActionHandler(client, player);
     }
@@ -636,7 +636,7 @@ public class Printer {
             pendingPlacements.clear();
             blockPosTimeout.clear();
             placementRate.reset();
-            inventoryManager.reset();
+            inventoryManager.onPrinterContextChanged();
             predictionWorld = client.world;
         }
         pendingPlacements.entrySet().removeIf(entry -> --entry.getValue().ticks <= 0);

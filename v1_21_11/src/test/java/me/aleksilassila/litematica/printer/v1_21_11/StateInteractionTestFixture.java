@@ -10,22 +10,27 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.input.Input;
+import net.minecraft.client.network.ClientCommonNetworkHandler;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.network.PendingUpdateManager;
 import net.minecraft.client.option.GameOptions;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.tutorial.TutorialManager;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityDimensions;
+import net.minecraft.entity.EntityEquipment;
 import net.minecraft.entity.player.ItemCooldownManager;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.PacketApplyBatcher;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.screen.PlayerScreenHandler;
@@ -156,6 +161,23 @@ final class StateInteractionTestFixture implements AutoCloseable {
 
     void fill(ItemStack stack) {
         for (int i = 0; i < 36; i++) player.inventory.main.set(i, stack.copy());
+    }
+
+    void enableInventoryPacketApplication() throws Exception {
+        // The packet handlers use this initialized player menu and apply on the fixture thread.
+        player.inventory = new PlayerInventory(player, new EntityEquipment());
+        var screen = new PlayerScreenHandler(player.inventory, false, player);
+        set(PlayerEntity.class, player, "playerScreenHandler", screen);
+        player.currentScreenHandler = screen;
+        set(ClientCommonNetworkHandler.class, network, "client", client);
+        set(MinecraftClient.class, client, "packetApplyBatcher", new PacketApplyBatcher(Thread.currentThread()));
+        set(MinecraftClient.class, client, "tutorialManager", new TutorialManager(client, client.options));
+    }
+
+    int inventorySwaps() {
+        return interaction.swaps + (int) network.packets.stream()
+                .filter(packet -> packet instanceof ClickSlotC2SPacket click && click.actionType() == SlotActionType.SWAP)
+                .count();
     }
     void target(BlockState current, BlockState desired) {
         world.blocks.put(TARGET, current); schematic.blocks.put(TARGET, desired);

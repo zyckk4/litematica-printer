@@ -1,5 +1,6 @@
 package me.aleksilassila.litematica.printer.v1_21_11;
 
+import it.unimi.dsi.fastutil.objects.Object2IntMaps;
 import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -7,8 +8,17 @@ import net.minecraft.block.Blocks;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
+import net.minecraft.network.packet.c2s.play.ClientStatusC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
+import net.minecraft.network.packet.s2c.play.InventoryS2CPacket;
+import net.minecraft.network.packet.s2c.play.ScreenHandlerSlotUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.SetPlayerInventoryS2CPacket;
+import net.minecraft.network.packet.s2c.play.StatisticsS2CPacket;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.screen.sync.ItemStackHash;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -35,20 +45,30 @@ final class InventoryLatencyBenchmark {
             Blocks.CYAN_CONCRETE, Blocks.PURPLE_CONCRETE, Blocks.BLUE_CONCRETE,
             Blocks.BROWN_CONCRETE, Blocks.GREEN_CONCRETE, Blocks.RED_CONCRETE, Blocks.BLACK_CONCRETE);
 
-    static void run(boolean baselineTickOrder) throws Exception {
+    static void run(boolean baselineTickOrder, boolean authoritative) throws Exception {
         System.out.println("Inventory latency benchmark: 20 TPS, 200 ms base RTT, fixed or deterministic" +
                 " ±50 ms one-way jitter, FIFO delivery, 9 interactions per 310 ms, simple blocks. " +
-                "Inventory countdown " + (baselineTickOrder ? "before" : "after") + " placement flush.");
-        runScenario("cache-only-jitter", 1, 10, true, false, baselineTickOrder);
-        runScenario("mixed-fixed", PALETTE.size(), 10, false, false, baselineTickOrder);
-        runScenario("mixed-jitter", PALETTE.size(), 10, true, false, baselineTickOrder);
-        runScenario("mixed-short-delay-jitter", PALETTE.size(), 5, true, false, baselineTickOrder);
-        runScenario("mixed-rejected-swap-jitter", PALETTE.size(), 10, true, true, baselineTickOrder);
+                "Inventory countdown " + (baselineTickOrder ? "before" : "after") + " placement flush. " +
+                "Refill mode: " + (authoritative ? "authoritative update" : "timed prediction") + ".");
+        runScenario("cache-only-jitter", 1, 10, true, Fault.NONE, baselineTickOrder, authoritative);
+        runScenario("mixed-fixed", PALETTE.size(), 10, false, Fault.NONE, baselineTickOrder, authoritative);
+        runScenario("mixed-jitter", PALETTE.size(), 10, true, Fault.NONE, baselineTickOrder, authoritative);
+        runScenario("mixed-short-delay-jitter", PALETTE.size(), 5, true, Fault.NONE, baselineTickOrder, authoritative);
+        runScenario("mixed-rejected-swap-jitter", PALETTE.size(), 10, true, Fault.REJECT_FIRST,
+                baselineTickOrder, authoritative);
+        if (authoritative) {
+            runScenario("split-and-unscoped-update", 1, 10, false, Fault.SPLIT_FIRST, baselineTickOrder, true);
+            runScenario("authoritative-count-mismatch", 1, 10, false, Fault.COUNT_MISMATCH_FIRST, baselineTickOrder, true);
+            runScenario("original-updates-withheld", 1, 10, false, Fault.WITHHOLD_FIRST, baselineTickOrder, true);
+            runScenario("readback-fence-withheld", 1, 10, false, Fault.WITHHOLD_FENCE, baselineTickOrder, true);
+        }
     }
 
     private static void runScenario(String name, int materials, int delay, boolean jitter,
-                                    boolean rejectFirstSwap, boolean baselineTickOrder) throws Exception {
+                                    Fault fault, boolean baselineTickOrder,
+                                    boolean authoritative) throws Exception {
         try (StateInteractionTestFixture fixture = new StateInteractionTestFixture()) {
+            fixture.enableInventoryPacketApplication();
             fixture.configure(PrinterConfig.INVENTORY_DELAY, delay);
             fixture.configure(PrinterConfig.INTERACTION_WINDOW_LIMIT, 9);
             fixture.configure(PrinterConfig.INTERACTION_WINDOW_MS, 310);
@@ -65,18 +85,25 @@ final class InventoryLatencyBenchmark {
                     fixture.world.blocks.put(pos.down(), Blocks.STONE.getDefaultState());
                 }
             }
-            fixture.schematic.blocks.putAll(expected);
-            for (int i = 0; i < materials; i++) {
-                // Fill the seven writable hotbar slots before using main inventory.
-                fixture.player.inventory.main.set(i + 2, new ItemStack(PALETTE.get(i), 64));
+            if (fault.singleRefill) {
+                expected.clear();
+                expected.put(StateInteractionTestFixture.TARGET, PALETTE.getLast().getDefaultState());
+                fixture.player.inventory.main.set(9, new ItemStack(PALETTE.getLast(), 64));
+            } else {
+                for (int i = 0; i < materials; i++) {
+                    // Fill the seven writable hotbar slots before using main inventory.
+                    fixture.player.inventory.main.set(i + 2, new ItemStack(PALETTE.get(i), 64));
+                }
             }
+            fixture.schematic.blocks.putAll(expected);
 
-            var server = new SimulatedServer(fixture, expected, delay, jitter, rejectFirstSwap);
-            fixture.interaction.swapSink = server::submitSwap;
+            var server = new SimulatedServer(fixture, expected, delay, jitter, fault, authoritative);
+            fixture.interaction.swapSink = server::submitPredictedSwap;
             fixture.network.packetSink = server::submitPacket;
             long start = System.nanoTime();
             int clientComplete = -1;
-            for (int tick = 0; tick < MAX_TICKS; tick++) {
+            int tickLimit = fault.singleRefill ? 40 : MAX_TICKS;
+            for (int tick = 0; tick < tickLimit; tick++) {
                 waitUntil(start + tick * TICK_NANOS);
                 server.advance(tick);
                 fixture.player.age++;
@@ -87,6 +114,7 @@ final class InventoryLatencyBenchmark {
                 MovementHandler.onMovementSent(fixture.player);
                 fixture.printer.flushNativePlacements();
                 if (!baselineTickOrder) Printer.inventoryManager.tick();
+                server.verifyNoPostSendPrediction();
                 if (server.completeTick >= 0 && server.quiet()
                         && expected.entrySet().stream().allMatch(entry ->
                                 entry.getValue().equals(fixture.world.getBlockState(entry.getKey())))) {
@@ -96,33 +124,71 @@ final class InventoryLatencyBenchmark {
             }
 
             System.out.printf("INVENTORY_BENCHMARK %s delay=%d targets=%d materials=%d correct=%d wrong=%d " +
-                            "swaps=%d rejectedSwaps=%d fullInventorySyncs=%d placementAttempts=%d failedAttempts=%d " +
+                            "swaps=%d rawSwaps=%d readbacks=%d statsRequests=%d statsResponses=%d " +
+                            "rejectedSwaps=%d fullInventorySyncs=%d " +
+                            "placementAttempts=%d failedAttempts=%d " +
                             "firstUses=%d firstUseRejected=%d firstUseEmpty=%d firstUseWrong=%d " +
                             "usesDuringSettle=%d usesPendingDestination=%d overlappingSwapsDuringSettle=%d " +
                             "maxInFlightSwaps=%d " +
                             "serverCompleteTick=%d clientCompleteTick=%d inventoryMatches=%b%n",
                     name, delay, expected.size(), materials, server.countCorrect(), server.wrongPlacements,
-                    fixture.interaction.swaps, server.rejectedSwaps, server.corrections, server.placementAttempts,
+                    server.materialSwaps, server.rawSwaps, server.readbacks, server.statsRequests,
+                    server.statsResponses, server.rejectedSwaps,
+                    server.corrections, server.placementAttempts,
                     server.failedPlacements, server.firstUses, server.firstUseRejected, server.firstUseEmpty,
                     server.firstUseWrong, server.usesDuringSettle, server.usesPendingDestination,
                     server.overlappingSwapsDuringSettle, server.maxInFlightSwaps,
                     server.completeTick, clientComplete, server.inventoryMatches());
-            if (clientComplete < 0 || server.wrongPlacements != 0 || !server.inventoryMatches()) {
+            if (fault == Fault.WITHHOLD_FENCE) {
+                if (clientComplete != -1 || server.placementAttempts != 0 || server.materialSwaps != 1) {
+                    throw new AssertionError("Tried to use or retry a refill after the recovery fence was withheld");
+                }
+            } else if (clientComplete < 0 || server.wrongPlacements != 0 || !server.inventoryMatches()) {
                 List<BlockPos> incorrect = expected.entrySet().stream()
                         .filter(entry -> !entry.getValue().equals(server.stateAt(entry.getKey())))
                         .map(Map.Entry::getKey).toList();
                 throw new AssertionError("Failed to complete " + name + " with exact blocks and inventory. " +
                         "Incorrect or missing targets: " + incorrect);
             }
-            if (materials == 1 && fixture.interaction.swaps != 0) {
+            if (materials == 1 && fault == Fault.NONE && server.materialSwaps != 0) {
                 throw new AssertionError("A cache-only job attempted to refill");
             }
-            if (rejectFirstSwap && server.rejectedSwaps != 1) {
+            int expectedRawSwaps = authoritative ? server.materialSwaps : 0;
+            if (server.rawSwaps != expectedRawSwaps) throw new AssertionError("Unexpected refill wire path");
+            if (fault == Fault.REJECT_FIRST && server.rejectedSwaps != 1) {
                 throw new AssertionError("The planned server rejection did not happen");
             }
+            if (authoritative) verifyFaultResponse(fault, server);
             if (server.usesPendingDestination != 0 || server.overlappingSwapsDuringSettle != 0) {
                 throw new AssertionError("Used pending destination or attempted another SWAP before settlement");
             }
+        }
+    }
+
+    private static void verifyFaultResponse(Fault fault, SimulatedServer server) {
+        if (fault == Fault.SPLIT_FIRST && server.splitUpdates != 1) {
+            throw new AssertionError("The split/scoped response was not exercised");
+        }
+        if (fault == Fault.COUNT_MISMATCH_FIRST || fault == Fault.WITHHOLD_FIRST || fault == Fault.WITHHOLD_FENCE) {
+            int expectedStats = fault == Fault.WITHHOLD_FENCE ? 1 : 2;
+            if (server.readbacks != 1 || server.statsRequests != 2 || server.statsResponses != expectedStats
+                    || server.corrections != 1) {
+                throw new AssertionError("Expected one readback and a scoped full inventory with the planned fence response");
+            }
+        }
+        if (fault == Fault.REJECT_FIRST && (server.readbacks < 1 || server.statsResponses < 2)) {
+            throw new AssertionError("Expected a fenced authoritative readback after the rejected swap");
+        }
+    }
+
+    private enum Fault {
+        NONE(false), REJECT_FIRST(false), SPLIT_FIRST(true), COUNT_MISMATCH_FIRST(true),
+        WITHHOLD_FIRST(true), WITHHOLD_FENCE(true);
+
+        private final boolean singleRefill;
+
+        Fault(boolean singleRefill) {
+            this.singleRefill = singleRefill;
         }
     }
 
@@ -141,11 +207,18 @@ final class InventoryLatencyBenchmark {
         private final OrderedLink uplink;
         private final OrderedLink downlink;
         private final int delay;
-        private final boolean rejectFirstSwap;
+        private final Fault fault;
+        private final boolean authoritative;
+        private List<ItemStack> clientBeforeTick;
         private int selectedSlot;
-        private int clientRevision;
         private int serverRevision;
         private int tick;
+        private int materialSwaps;
+        private int rawSwaps;
+        private int readbacks;
+        private int statsRequests;
+        private int statsResponses;
+        private int splitUpdates;
         private int rejectedSwaps;
         private int corrections;
         private int failedPlacements;
@@ -156,7 +229,7 @@ final class InventoryLatencyBenchmark {
         private int firstUseEmpty;
         private int firstUseWrong;
         private int settleUntil;
-        private int settlingDestination = -1;
+        private SwapObservation latestSwap;
         private int usesDuringSettle;
         private int usesPendingDestination;
         private int overlappingSwapsDuringSettle;
@@ -165,11 +238,12 @@ final class InventoryLatencyBenchmark {
         private int completeTick = -1;
 
         SimulatedServer(StateInteractionTestFixture fixture, Map<BlockPos, BlockState> expected,
-                        int delay, boolean jitter, boolean rejectFirstSwap) {
+                        int delay, boolean jitter, Fault fault, boolean authoritative) {
             this.fixture = fixture;
             this.expected = expected;
             this.delay = delay;
-            this.rejectFirstSwap = rejectFirstSwap;
+            this.fault = fault;
+            this.authoritative = authoritative;
             uplink = jitter ? new OrderedLink(0, 0, 1, 0, -1, 0, 0, 1) : new OrderedLink(0);
             downlink = jitter ? new OrderedLink(0, 1, 0, 0, -1, 0, 1, 0) : new OrderedLink(0);
             authoritativeBlocks = new HashMap<>(fixture.world.blocks);
@@ -183,78 +257,216 @@ final class InventoryLatencyBenchmark {
             dirtySlots.forEach(this::sendSlot);
             dirtySlots.clear();
             downlink.deliver(tick);
+            if (authoritative) {
+                clientBeforeTick = fixture.player.inventory.main.stream().map(ItemStack::copy).toList();
+            }
         }
 
         boolean quiet() {
             return uplink.pending.isEmpty() && downlink.pending.isEmpty() && dirtySlots.isEmpty();
         }
 
-        void submitSwap(int source, int destination) {
-            if (tick < settleUntil) overlappingSwapsDuringSettle++;
-            settleUntil = tick + Math.max(1, delay);
-            settlingDestination = destination;
-            inFlightSwaps++;
-            maxInFlightSwaps = Math.max(maxInFlightSwaps, inFlightSwaps);
-            int revision = clientRevision;
-            ItemStack sourcePrediction = fixture.player.inventory.main.get(source).copy();
-            ItemStack destinationPrediction = fixture.player.inventory.main.get(destination).copy();
-            uplink.enqueue(tick, () -> applySwap(source, destination, revision,
-                    sourcePrediction, destinationPrediction));
+        private boolean swapOutstanding() {
+            return latestSwap != null && (authoritative ? !latestSwap.complete() : tick < settleUntil);
         }
 
-        private void applySwap(int source, int destination, int revision,
+        void submitPredictedSwap(int source, int destination) {
+            if (authoritative) throw new AssertionError("Authoritative refill invoked local prediction");
+            int revision = fixture.player.playerScreenHandler.getRevision();
+            ItemStack sourcePrediction = fixture.player.inventory.main.get(source).copy();
+            ItemStack destinationPrediction = fixture.player.inventory.main.get(destination).copy();
+            submitSwap(source, destination, revision, sourcePrediction, destinationPrediction);
+        }
+
+        private void submitSwap(int source, int destination, int revision,
+                                ItemStack sourcePrediction, ItemStack destinationPrediction) {
+            if (swapOutstanding()) overlappingSwapsDuringSettle++;
+            materialSwaps++;
+            settleUntil = tick + Math.max(1, delay);
+            SwapObservation swap = new SwapObservation(source, destination, materialSwaps == 1, tick);
+            latestSwap = swap;
+            inFlightSwaps++;
+            maxInFlightSwaps = Math.max(maxInFlightSwaps, inFlightSwaps);
+            uplink.enqueue(tick, () -> applySwap(swap, revision, sourcePrediction, destinationPrediction));
+        }
+
+        private void applySwap(SwapObservation swap, int revision,
                                ItemStack sourcePrediction, ItemStack destinationPrediction) {
             inFlightSwaps--;
+            int source = swap.source;
+            int destination = swap.destination;
             waitingForFirstUse.add(destination);
-            if (rejectFirstSwap && rejectedSwaps == 0) {
+            if (fault == Fault.REJECT_FIRST && swap.first) {
                 rejectedSwaps++;
-                sendInventory();
+                swap.recoveryRequired = true;
+                sendInventory(swap, false);
                 return;
             }
             ItemStack displaced = inventory.get(destination);
-            inventory.set(destination, inventory.get(source));
+            ItemStack incoming = inventory.get(source);
+            if (swap.first && fault == Fault.COUNT_MISMATCH_FIRST) {
+                incoming.decrement(1);
+                swap.recoveryRequired = true;
+            }
+            inventory.set(destination, incoming);
             inventory.set(source, displaced);
+            if (swap.first && (fault == Fault.WITHHOLD_FIRST || fault == Fault.WITHHOLD_FENCE)) {
+                swap.recoveryRequired = true;
+                return;
+            }
             if (revision != serverRevision) {
-                sendInventory();
+                sendInventory(swap, false);
                 return;
             }
             dirtySlots.remove(source);
             dirtySlots.remove(destination);
-            if (!ItemStack.areEqual(sourcePrediction, inventory.get(source))) sendSlot(source);
-            if (!ItemStack.areEqual(destinationPrediction, inventory.get(destination))) sendSlot(destination);
+            if (authoritative) {
+                // No optimistic slot hashes replace the server's pre-click slot snapshots.
+                if (!ItemStack.areEqual(displaced, incoming)) {
+                    sendSlot(source, swap);
+                    if (swap.first && fault == Fault.SPLIT_FIRST) {
+                        splitUpdates++;
+                        ItemStack copy = incoming.copy();
+                        downlink.enqueue(tick, () -> fixture.network.onSetPlayerInventory(
+                                new SetPlayerInventoryS2CPacket(destination, copy)));
+                        sendSlot(destination, swap, 1);
+                    } else {
+                        sendSlot(destination, swap);
+                    }
+                }
+            } else {
+                if (!ItemStack.areEqual(sourcePrediction, inventory.get(source))) sendSlot(source);
+                if (!ItemStack.areEqual(destinationPrediction, inventory.get(destination))) sendSlot(destination);
+            }
         }
 
         private void sendSlot(int slot) {
+            sendSlot(slot, null);
+        }
+
+        private void sendSlot(int slot, SwapObservation swap) {
+            sendSlot(slot, swap, 0);
+        }
+
+        private void sendSlot(int slot, SwapObservation swap, int extraDelay) {
             ItemStack stack = inventory.get(slot).copy();
-            int revision = ++serverRevision;
-            downlink.enqueue(tick, () -> {
-                fixture.player.inventory.main.set(slot, stack);
-                clientRevision = revision;
+            int revision = advanceRevision();
+            downlink.enqueue(tick, extraDelay, () -> {
+                fixture.network.onScreenHandlerSlotUpdate(new ScreenHandlerSlotUpdateS2CPacket(
+                        0, revision, toScreenSlot(slot), stack));
+                if (swap != null) swap.noteSlot(slot);
             });
         }
 
-        private void sendInventory() {
+        private void sendInventory(SwapObservation swap, boolean readback) {
             corrections++;
             dirtySlots.clear();
-            List<ItemStack> snapshot = inventory.stream().map(ItemStack::copy).toList();
-            int revision = ++serverRevision;
+            List<ItemStack> snapshot = new ArrayList<>(java.util.Collections.nCopies(
+                    PlayerScreenHandler.OFFHAND_ID + 1, ItemStack.EMPTY));
+            for (int slot = 0; slot < inventory.size(); slot++) {
+                snapshot.set(toScreenSlot(slot), inventory.get(slot).copy());
+            }
+            int revision = advanceRevision();
             downlink.enqueue(tick, () -> {
-                for (int i = 0; i < snapshot.size(); i++) fixture.player.inventory.main.set(i, snapshot.get(i));
-                clientRevision = revision;
+                fixture.network.onInventory(new InventoryS2CPacket(0, revision, snapshot, ItemStack.EMPTY));
+                if (swap != null) swap.noteInventory(readback);
             });
+        }
+
+        private int advanceRevision() {
+            serverRevision = (serverRevision + 1) & 0x7fff;
+            return serverRevision;
+        }
+
+        private static int toScreenSlot(int inventorySlot) {
+            return inventorySlot < PlayerScreenHandler.INVENTORY_START
+                    ? PlayerScreenHandler.HOTBAR_START + inventorySlot : inventorySlot;
+        }
+
+        private void submitRawSwap(ClickSlotC2SPacket click) {
+            if (!authoritative || click.syncId() != 0 || click.actionType() != SlotActionType.SWAP
+                    || click.button() < 0 || click.button() >= PlayerScreenHandler.INVENTORY_START
+                    || !click.modifiedStacks().isEmpty() || !click.cursor().equals(ItemStackHash.EMPTY)) {
+                throw new AssertionError("Unexpected authoritative click packet: " + click);
+            }
+            int destination = click.button();
+            if (click.slot() == toScreenSlot(destination)) {
+                SwapObservation swap = latestSwap;
+                if (swap == null || !swap.initialStatsSeen || swap.probeSent || destination != swap.destination
+                        || click.revision() != (fixture.player.playerScreenHandler.getRevision() ^ 0x4000)) {
+                    throw new AssertionError("Unexpected recovery readback packet: " + click);
+                }
+                readbacks++;
+                swap.probeSent = true;
+                uplink.enqueue(tick, () -> {
+                    if (click.revision() != serverRevision) sendInventory(swap, true);
+                });
+                return;
+            }
+            int source = click.slot();
+            if (source < PlayerScreenHandler.INVENTORY_START || source >= PlayerScreenHandler.HOTBAR_START
+                    || click.revision() != fixture.player.playerScreenHandler.getRevision()) {
+                throw new AssertionError("Unexpected source or revision for material SWAP: " + click);
+            }
+            verifyEndpointsUnchanged(source, destination);
+            rawSwaps++;
+            submitSwap(source, destination, click.revision(), null, null);
+        }
+
+        void verifyNoPostSendPrediction() {
+            if (authoritative && latestSwap != null && latestSwap.submittedTick == tick) {
+                verifyEndpointsUnchanged(latestSwap.source, latestSwap.destination);
+            }
+        }
+
+        private void verifyEndpointsUnchanged(int source, int destination) {
+            if (!ItemStack.areEqual(clientBeforeTick.get(source), fixture.player.inventory.main.get(source))
+                    || !ItemStack.areEqual(clientBeforeTick.get(destination), fixture.player.inventory.main.get(destination))) {
+                throw new AssertionError("Raw material SWAP also updated an endpoint locally");
+            }
         }
 
         void submitPacket(Packet<?> packet) {
-            if (packet instanceof UpdateSelectedSlotC2SPacket selected) {
+            if (packet instanceof ClickSlotC2SPacket click) {
+                submitRawSwap(click);
+            } else if (packet instanceof ClientStatusC2SPacket status
+                    && status.getMode() == ClientStatusC2SPacket.Mode.REQUEST_STATS) {
+                submitStatsFence();
+            } else if (packet instanceof UpdateSelectedSlotC2SPacket selected) {
                 uplink.enqueue(tick, () -> selectedSlot = selected.getSelectedSlot());
             } else if (packet instanceof PlayerInteractBlockC2SPacket placement) {
                 if (placement.getHand() != Hand.MAIN_HAND) throw new AssertionError("Unexpected offhand path");
-                if (tick < settleUntil) {
+                if (swapOutstanding()) {
                     usesDuringSettle++;
-                    if (fixture.player.inventory.selectedSlot == settlingDestination) usesPendingDestination++;
+                    if (fixture.player.inventory.selectedSlot == latestSwap.destination) usesPendingDestination++;
                 }
                 uplink.enqueue(tick, () -> place(placement));
             }
+        }
+
+        private void submitStatsFence() {
+            SwapObservation swap = latestSwap;
+            if (swap == null) throw new AssertionError("Unexpected stats fence without a pending refill");
+            boolean initial = !swap.initialStatsRequested;
+            if (initial) {
+                swap.initialStatsRequested = true;
+            } else {
+                if (!swap.probeSent || swap.statsRequested) {
+                    throw new AssertionError("A second stats fence is only expected after its own readback");
+                }
+                swap.statsRequested = true;
+            }
+            statsRequests++;
+            uplink.enqueue(tick, () -> {
+                if (!initial && fault == Fault.WITHHOLD_FENCE) return;
+                // Delay the second fence so a full inventory alone cannot release a recovery.
+                downlink.enqueue(tick, initial ? 0 : 1, () -> {
+                    if (initial) swap.initialStatsSeen = true;
+                    else swap.statsSeen = true;
+                    fixture.network.onStatistics(new StatisticsS2CPacket(Object2IntMaps.emptyMap()));
+                    statsResponses++;
+                });
+            });
         }
 
         private void place(PlayerInteractBlockC2SPacket packet) {
@@ -309,6 +521,44 @@ final class InventoryLatencyBenchmark {
         }
     }
 
+    private static final class SwapObservation {
+        private final int source;
+        private final int destination;
+        private final boolean first;
+        private final int submittedTick;
+        private boolean sourceSeen;
+        private boolean destinationSeen;
+        private boolean recoveryRequired;
+        private boolean initialStatsRequested;
+        private boolean initialStatsSeen;
+        private boolean probeSent;
+        private boolean statsRequested;
+        private boolean recoveryInventorySeen;
+        private boolean statsSeen;
+
+        SwapObservation(int source, int destination, boolean first, int submittedTick) {
+            this.source = source;
+            this.destination = destination;
+            this.first = first;
+            this.submittedTick = submittedTick;
+        }
+
+        void noteSlot(int slot) {
+            if (slot == source) sourceSeen = true;
+            if (slot == destination) destinationSeen = true;
+        }
+
+        void noteInventory(boolean readback) {
+            sourceSeen = true;
+            destinationSeen = true;
+            if (readback) recoveryInventorySeen = true;
+        }
+
+        boolean complete() {
+            return recoveryRequired ? recoveryInventorySeen && statsSeen : sourceSeen && destinationSeen;
+        }
+    }
+
     private static final class OrderedLink {
         private final ArrayDeque<Delivery> pending = new ArrayDeque<>();
         private final int[] jitter;
@@ -318,7 +568,11 @@ final class InventoryLatencyBenchmark {
         }
 
         void enqueue(int tick, Runnable action) {
-            int deliveryTick = tick + 2 + jitter[tick % jitter.length];
+            enqueue(tick, 0, action);
+        }
+
+        void enqueue(int tick, int extraDelay, Runnable action) {
+            int deliveryTick = tick + 2 + jitter[tick % jitter.length] + extraDelay;
             if (!pending.isEmpty()) deliveryTick = Math.max(deliveryTick, pending.getLast().tick());
             pending.addLast(new Delivery(deliveryTick, action));
         }

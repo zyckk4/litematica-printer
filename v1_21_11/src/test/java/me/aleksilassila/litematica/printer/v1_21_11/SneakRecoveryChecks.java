@@ -71,7 +71,7 @@ final class SneakRecoveryChecks {
         queueFallingPlacement(fixture, 12);
         runPressThenRefreshInput(fixture);
         fixture.printer.actionHandler.processPreviousTickActions();
-        check(fixture.interaction.swaps == 1 && fixture.interaction.blockUses == 0,
+        check(fixture.inventorySwaps() == 1 && fixture.interaction.blockUses == 0,
                 "Real inventory deferral was not reached before the block use");
         checkReleased(fixture, "Inventory deferral stranded server sneak");
     }

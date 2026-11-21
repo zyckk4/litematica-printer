@@ -24,7 +24,8 @@ public final class NativeRegressionChecks {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
         if (java.util.Arrays.asList(args).contains("--inventory-latency")) {
-            InventoryLatencyBenchmark.run(java.util.Arrays.asList(args).contains("--baseline-tick-order"));
+            InventoryLatencyBenchmark.run(java.util.Arrays.asList(args).contains("--baseline-tick-order"),
+                    !java.util.Arrays.asList(args).contains("--timed-refill"));
             return;
         }
         if (java.util.Arrays.asList(args).contains("--state-interactions")) {
