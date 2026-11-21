@@ -23,6 +23,10 @@ public final class NativeRegressionChecks {
     public static void main(String[] args) throws Exception {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
+        if (java.util.Arrays.asList(args).contains("--inventory-latency")) {
+            InventoryLatencyBenchmark.run(java.util.Arrays.asList(args).contains("--baseline-tick-order"));
+            return;
+        }
         if (java.util.Arrays.asList(args).contains("--state-interactions")) {
             int movingChecks = MovingStateRegressionChecks.run();
             int sneakChecks = SneakRecoveryChecks.run();

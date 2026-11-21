@@ -30,8 +30,7 @@ public class InventoryManager {
     private final Deque<Integer> lastUsedSlots = new ArrayDeque<>();
     private static InventoryManager instance;
     private ClientPlayerEntity inventoryOwner;
-    private int pendingHotbarSlot = -1;
-    private ItemStack pendingStack = ItemStack.EMPTY;
+    private PendingSwap pendingSwap;
 
     private InventoryManager() {
         // The config callback is not guaranteed to fire on the first launch.
@@ -69,8 +68,7 @@ public class InventoryManager {
 
     public void reset() {
         delay = 0;
-        pendingHotbarSlot = -1;
-        pendingStack = ItemStack.EMPTY;
+        pendingSwap = null;
     }
 
     public boolean tick() {
@@ -80,39 +78,47 @@ public class InventoryManager {
             return false;
         }
         ensureInventoryOwner(mc.player);
-        delay = Math.max(0, delay - 1);
+        // Give the first eligible tick a chance to inspect both slots before
+        // releasing a swap whose result no longer matches our prediction.
+        if (delay == 0) pendingSwap = null;
+        else delay--;
 
         return false;
     }
 
-    /**
-     * Swaps the item from the inventory to the hotbar
-     *
-     * @param stack The complete stack identity to pull from the inventory
-     * @return True if the item could the swapped into the hotbar
-     */
-    private boolean swapToHotbar(ClientPlayerEntity player, ItemStack stack) {
-        if (getHotbarSlotWithItem(player, stack) != -1) {
-            return true;
-        }
+    private boolean swapToHotbar(ClientPlayerEntity player, ItemStack stack, int nextSlot) {
+        if (nextSlot == -1) return false;
         int slot = getBestInventorySlotWithItem(player, stack);
-        if (slot == -1) {
-            return false;
-        }
-        int nextSlot = nextHotbarSlot();
-        if (nextSlot == -1) {
-            return false;
-        }
+        if (slot == -1) return false;
+        PlayerInventory inventory = player.getInventory();
+        PendingSwap swap = new PendingSwap(slot, nextSlot,
+                inventory.getStack(nextSlot).copy(), inventory.getStack(slot).copy());
         if (PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
             System.out.println("Swapping item from inventory: " + slot + " into hotbar -> " + nextSlot);
         }
         if (!swapAway(slot, nextSlot, player.playerScreenHandler)) return false;
-        pendingHotbarSlot = nextSlot;
-        pendingStack = stack.isEmpty() ? ItemStack.EMPTY : stack.copyWithCount(1);
-        // A successful vanilla click need not receive a slot-update ACK. Wait a
-        // bounded interval, then inspect the stack after any server corrections.
+        pendingSwap = swap;
+        recordRefillSlot(nextSlot);
+        // A successful vanilla click can go unacknowledged. Allow time for
+        // corrections before inspecting the slots affected by the click.
         delay = Math.max(1, PrinterConfig.INVENTORY_DELAY.getIntegerValue());
         return true;
+    }
+
+    private record PendingSwap(int sourceSlot, int hotbarSlot, ItemStack expectedSource, ItemStack expectedHotbar) {
+        boolean matches(PlayerInventory inventory) {
+            return ItemStack.areEqual(inventory.getStack(sourceSlot), expectedSource)
+                    && ItemStack.areEqual(inventory.getStack(hotbarSlot), expectedHotbar);
+        }
+    }
+
+    private PendingSwap unsettledSwap(ClientPlayerEntity player) {
+        if (inventoryOwner != player || pendingSwap == null) return null;
+        return delay > 0 || !pendingSwap.matches(player.getInventory()) ? pendingSwap : null;
+    }
+
+    private void releaseMatchingSwap(ClientPlayerEntity player) {
+        if (pendingSwap != null && unsettledSwap(player) == null) pendingSwap = null;
     }
 
     public void pickSlot(WorldSchematic world, ClientPlayerEntity player, BlockPos pos) {
@@ -182,47 +188,96 @@ public class InventoryManager {
                 || getBestInventorySlotWithItem(player, stack) != -1));
     }
 
+    /** True when the matching hotbar slot is usable without changing the inventory. */
+    public boolean hasReadyHotbarMaterial(ItemStack stack) {
+        ClientPlayerEntity player = mc.player;
+        return stack != null && canAccessInventory(player) && findReadyHotbarSlot(player, stack, false) != -1;
+    }
+
+    /** Native placements also need a unit beyond the material's in-flight uses. */
+    public boolean hasReadyNativeMaterial(ItemStack stack) {
+        ClientPlayerEntity player = mc.player;
+        return stack != null && !stack.isEmpty() && canAccessInventory(player)
+                && findReadyHotbarSlot(player, stack, true) != -1;
+    }
+
+    public boolean selectReadyHotbarMaterial(ItemStack stack) {
+        ClientPlayerEntity player = mc.player;
+        if (stack == null || !canAccessInventory(player)) return false;
+        ensureInventoryOwner(player);
+        releaseMatchingSwap(player);
+        int slot = findReadyHotbarSlot(player, stack, false);
+        if (slot == -1) return false;
+        selectReadySlot(player, slot);
+        return true;
+    }
+
+    public boolean canPrefetch() {
+        ClientPlayerEntity player = mc.player;
+        return canStageRefill(player) && findRefillSlot(player, false, List.of()) != -1;
+    }
+
+    public boolean canStartRefill() {
+        ClientPlayerEntity player = mc.player;
+        if (!canAccessInventory(player) || unsettledSwap(player) != null) return false;
+        if (player.getAbilities().creativeMode) return firstCreativeRefillSlot() != -1;
+        return findRefillSlot(player, true, List.of()) != -1;
+    }
+
+    /** Stage a future material without changing the current selection. */
+    public boolean prefetch(ItemStack stack, List<ItemStack> keepInHotbar) {
+        ClientPlayerEntity player = mc.player;
+        if (stack == null || !canStageRefill(player) || findReadyHotbarSlot(player, stack, false) != -1) return false;
+        ensureInventoryOwner(player);
+        return swapToHotbar(player, stack, findRefillSlot(player, false, keepInHotbar));
+    }
+
+    private boolean canStageRefill(ClientPlayerEntity player) {
+        return canAccessInventory(player) && !player.getAbilities().creativeMode && unsettledSwap(player) == null;
+    }
+
+    private boolean canAccessInventory(ClientPlayerEntity player) {
+        // Never close a screen or dispose of a cursor stack as a side effect of printing.
+        return player != null && mc.interactionManager != null
+                && player.currentScreenHandler == player.playerScreenHandler
+                && player.playerScreenHandler.getCursorStack().isEmpty();
+    }
+
     /**
      * Returns true only when MAIN_HAND is ready for an ordered UseOn packet.
      * False after a swap means defer and rescan; it is not a missing-material result.
      */
     public boolean select(ItemStack itemStack) {
         ClientPlayerEntity player = mc.player;
-        if (player == null || mc.interactionManager == null || itemStack == null) {
-            return false;
-        }
+        if (itemStack == null || !canAccessInventory(player)) return false;
         ensureInventoryOwner(player);
-        // Never close a screen or dispose of a cursor stack as a side effect of printing.
-        if (player.currentScreenHandler != player.playerScreenHandler
-                || !player.playerScreenHandler.getCursorStack().isEmpty() || delay > 0) {
-            return false;
+        releaseMatchingSwap(player);
+        int hotbarSlot = findReadyHotbarSlot(player, itemStack, false);
+        if (hotbarSlot != -1) {
+            selectReadySlot(player, hotbarSlot);
+            return true;
         }
-        if (pendingHotbarSlot != -1) {
-            ItemStack actual = player.getInventory().getStack(pendingHotbarSlot);
-            boolean settled = pendingStack.isEmpty() ? actual.isEmpty()
-                    : ItemStack.areItemsAndComponentsEqual(actual, pendingStack);
-            pendingHotbarSlot = -1;
-            pendingStack = ItemStack.EMPTY;
-            if (!settled) return false;
-        }
+        if (unsettledSwap(player) != null) return false;
 
-        int hotbarSlot = getHotbarSlotWithItem(player, itemStack);
         // Empty-hand interactions may use an existing empty slot. Never erase
         // a stack to manufacture an empty hand, including in creative mode.
-        if (hotbarSlot == -1 && !itemStack.isEmpty() && player.getAbilities().creativeMode) {
-            hotbarSlot = nextHotbarSlot();
-            if (hotbarSlot == -1) return false;
-            ItemStack picked = itemStack.copy();
-            player.getInventory().setStack(hotbarSlot, picked);
-            mc.interactionManager.clickCreativeStack(picked, PlayerScreenHandler.HOTBAR_START + hotbarSlot);
-        }
-        if (hotbarSlot == -1) {
-            swapToHotbar(player, itemStack);
+        if (itemStack.isEmpty() || !player.getAbilities().creativeMode) {
+            swapToHotbar(player, itemStack, findRefillSlot(player, true, List.of()));
             return false;
         }
-        selectHotbarSlot(player, hotbarSlot);
-        updateLastUsedSlot(hotbarSlot);
+        hotbarSlot = firstCreativeRefillSlot();
+        if (hotbarSlot == -1) return false;
+        ItemStack picked = itemStack.copy();
+        player.getInventory().setStack(hotbarSlot, picked);
+        mc.interactionManager.clickCreativeStack(picked, PlayerScreenHandler.HOTBAR_START + hotbarSlot);
+        recordRefillSlot(hotbarSlot);
+        selectReadySlot(player, hotbarSlot);
         return true;
+    }
+
+    private void selectReadySlot(ClientPlayerEntity player, int slot) {
+        selectHotbarSlot(player, slot);
+        updateLastUsedSlot(slot);
     }
 
     private void ensureInventoryOwner(ClientPlayerEntity player) {
@@ -252,48 +307,42 @@ public class InventoryManager {
         return true;
     }
 
-    /**
-     * Returns the next available slot for a new item. Returns the slot to the end of the queue after returning.
-     * Range from 0-8
-     *
-     * @return The next available slot
-     */
-    private int nextHotbarSlot() {
-        final String mode = PrinterConfig.PRINTER_INVENTORY_MANAGEMENT_MODE.getStringValue();
+    private int findRefillSlot(ClientPlayerEntity player, boolean allowSelected, List<ItemStack> keepInHotbar) {
+        PlayerInventory inventory = player.getInventory();
+        int selectedSlot = inventory.getSelectedSlot();
+        int idleSlot = -1;
+        int selectedFallback = -1;
+        for (int slot : refillSlotOrder()) {
+            if (!USABLE_SLOTS.contains(slot) || (slot == selectedSlot && !allowSelected)) continue;
+            ItemStack held = inventory.getStack(slot);
+            if (!held.isEmpty() && (Printer.pendingItemCount(held) > 0 || keepInHotbar.stream()
+                    .anyMatch(stack -> ItemStack.areItemsAndComponentsEqual(held, stack)))) continue;
+            if (slot == selectedSlot) selectedFallback = slot;
+            else if (held.isEmpty()) return slot;
+            else if (idleSlot == -1) idleSlot = slot;
+        }
+        return idleSlot == -1 ? selectedFallback : idleSlot;
+    }
 
-        if (PrinterConfig.InventoryManagementModeEnum.LEAST_USED.is(mode)) {
-            if (!lastUsedSlots.isEmpty()) {
-                List<Integer> usableSlots = lastUsedSlots.stream().filter(USABLE_SLOTS::contains).toList();
-                if (usableSlots.isEmpty()) {
-                    return -1;
-                }
-                int last = usableSlots.getLast();
-                lastUsedSlots.remove(last);
-                lastUsedSlots.addFirst(last);
-                if (PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
-                    System.out.println("Next new least used slot: " + last + "Last used slots: " + lastUsedSlots);
-                }
-                return last;
-            }
-        } else if (PrinterConfig.InventoryManagementModeEnum.ROLLING.is(mode)) {
-            if (!rollingSlots.isEmpty()) {
-                List<Integer> usableSlots = rollingSlots.stream().filter(USABLE_SLOTS::contains).toList();
-                if (usableSlots.isEmpty()) {
-                    return -1;
-                }
-                int slot = usableSlots.getFirst();
-                rollingSlots.remove(slot);
-                rollingSlots.addLast(slot);
-                if (PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
-                    System.out.println("Next new rolling slot: " + slot + "Rolling slots: " + rollingSlots);
-                }
-                return slot;
-            }
+    private Deque<Integer> refillSlotOrder() {
+        String mode = PrinterConfig.PRINTER_INVENTORY_MANAGEMENT_MODE.getStringValue();
+        if (PrinterConfig.InventoryManagementModeEnum.ROLLING.is(mode)) return rollingSlots;
+        return lastUsedSlots.reversed();
+    }
+
+    private int firstCreativeRefillSlot() {
+        return refillSlotOrder().stream().filter(USABLE_SLOTS::contains).findFirst().orElse(-1);
+    }
+
+    private void recordRefillSlot(int slot) {
+        String mode = PrinterConfig.PRINTER_INVENTORY_MANAGEMENT_MODE.getStringValue();
+        if (PrinterConfig.InventoryManagementModeEnum.ROLLING.is(mode)) {
+            rollingSlots.remove(slot);
+            rollingSlots.addLast(slot);
+        } else {
+            lastUsedSlots.remove(slot);
+            lastUsedSlots.addFirst(slot);
         }
-        if (PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
-            System.out.println("No slots available");
-        }
-        return -1;
     }
 
     /**
@@ -325,16 +374,31 @@ public class InventoryManager {
      * Return a number between 0-8 representing the hotbar slot with the given item.
      */
     public int getHotbarSlotWithItem(ClientPlayerEntity player, ItemStack itemStack) {
-        PlayerInventory inventory = player.getInventory();
+        return findHotbarSlot(player.getInventory(), itemStack, -1, 0, false);
+    }
 
-        for (int i = 0; i < 9; ++i) {
-            if (itemStack.isEmpty() && inventory.main.get(i).isEmpty()) return i;
-            if (!inventory.main.get(i).isEmpty() && ItemStack.areItemsAndComponentsEqual(inventory.main.get(i), itemStack)) {
-                return i;
+    private int findReadyHotbarSlot(ClientPlayerEntity player, ItemStack itemStack, boolean requireAvailableCount) {
+        PendingSwap pending = unsettledSwap(player);
+        int pendingSlot = pending == null ? -1 : pending.hotbarSlot();
+        int pendingUseCount = itemStack.isEmpty() || player.getAbilities().creativeMode
+                ? 0 : Printer.pendingItemCount(itemStack);
+        return findHotbarSlot(player.getInventory(), itemStack, pendingSlot, pendingUseCount, requireAvailableCount);
+    }
+
+    private static int findHotbarSlot(PlayerInventory inventory, ItemStack itemStack, int excludedSlot,
+                                      int pendingUseCount, boolean requireAvailableCount) {
+        int matchingSlot = -1;
+        for (int slot = 0; slot < 9; slot++) {
+            if (slot == excludedSlot) continue;
+            ItemStack held = inventory.getStack(slot);
+            if (itemStack.isEmpty()) {
+                if (held.isEmpty()) return slot;
+            } else if (!held.isEmpty() && ItemStack.areItemsAndComponentsEqual(held, itemStack)) {
+                if (held.getCount() > pendingUseCount) return slot;
+                if (matchingSlot == -1) matchingSlot = slot;
             }
         }
-
-        return -1;
+        return requireAvailableCount ? -1 : matchingSlot;
     }
 
     private void updateLastUsedSlot(int slot) {

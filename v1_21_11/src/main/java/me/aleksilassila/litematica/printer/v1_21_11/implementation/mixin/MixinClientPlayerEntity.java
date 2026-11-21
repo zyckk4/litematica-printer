@@ -44,6 +44,12 @@ public class MixinClientPlayerEntity extends AbstractClientPlayerEntity {
         }
     }
 
+    @Inject(at = @At("RETURN"), method = "tick")
+    private void finishInventoryTick(CallbackInfo ci) {
+        // Movement-tail actions must observe the same refill delay as queued actions.
+        Printer.inventoryManager.tick();
+    }
+
     @Inject(at = @At("HEAD"), method = "tick")
     public void tickHead(CallbackInfo ci) {
         ClientPlayerEntity clientPlayer = (ClientPlayerEntity) (Object) this;
@@ -55,7 +61,6 @@ public class MixinClientPlayerEntity extends AbstractClientPlayerEntity {
         LitematicaMixinMod.printer.actionHandler.processPreviousTickActions();
         LitematicaMixinMod.printer.onGameTick();
         LitematicaMixinMod.printer.actionHandler.processCurrentTickActions();
-        Printer.inventoryManager.tick();
         LitematicaMixinMod.freeLook.onGameTick();
         LitematicaMixinMod.movementHandler.onGameTick();
     }

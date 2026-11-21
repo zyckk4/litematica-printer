@@ -48,6 +48,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /** Small live-method fixture: real printer actions, captured network and inventory sinks. */
 final class StateInteractionTestFixture implements AutoCloseable {
@@ -136,7 +138,9 @@ final class StateInteractionTestFixture implements AutoCloseable {
         world.blocks.clear(); schematic.blocks.clear();
         network.packets.clear(); network.inputs.clear(); network.blockPackets.clear();
         network.inputFailure = null;
+        network.packetSink = null;
         interaction.swaps = 0; interaction.blockUses = 0; interaction.rejectBlocks = false;
+        interaction.swapSink = null;
         fill(ItemStack.EMPTY);
         player.inventory.selectedSlot = 0; player.offhand = new ItemStack(Items.TORCH, 12);
         player.sneaking = false; player.reach = 4.5; player.age++;
@@ -236,6 +240,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
         List<PlayerInput> inputs;
         List<PlayerInteractBlockC2SPacket> blockPackets;
         RuntimeException inputFailure;
+        Consumer<Packet<?>> packetSink;
         private FixtureNetwork() { super(null, null, null); }
         @Override public net.minecraft.client.network.PlayerListEntry getPlayerListEntry(java.util.UUID uuid) { return null; }
         @Override public void sendPacket(Packet<?> packet) {
@@ -243,12 +248,14 @@ final class StateInteractionTestFixture implements AutoCloseable {
             packets.add(packet);
             if (packet instanceof PlayerInputC2SPacket input) inputs.add(input.input());
             if (packet instanceof PlayerInteractBlockC2SPacket block) blockPackets.add(block);
+            if (packetSink != null) packetSink.accept(packet);
         }
     }
     static final class FixtureInteraction extends ClientPlayerInteractionManager {
         int swaps;
         int blockUses;
         boolean rejectBlocks;
+        BiConsumer<Integer, Integer> swapSink;
         private FixtureInteraction() { super(null, null); }
         @Override public void clickSlot(int syncId, int slotId, int button, SlotActionType type, PlayerEntity player) {
             if (type != SlotActionType.SWAP || slotId < 9 || slotId >= 36) throw new AssertionError("Unexpected inventory operation");
@@ -256,6 +263,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
             ItemStack old = player.getInventory().main.get(button);
             player.getInventory().main.set(button, player.getInventory().main.get(slotId));
             player.getInventory().main.set(slotId, old);
+            if (swapSink != null) swapSink.accept(slotId, button);
         }
         @Override public ActionResult interactBlock(ClientPlayerEntity player, Hand hand, BlockHitResult hit) {
             blockUses++; return rejectBlocks ? ActionResult.FAIL : ActionResult.SUCCESS;

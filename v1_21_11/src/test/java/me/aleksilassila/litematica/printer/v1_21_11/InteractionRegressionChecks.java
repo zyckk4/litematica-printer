@@ -79,6 +79,7 @@ public final class InteractionRegressionChecks {
         try {
             Fixture fixture = createFixture();
             checkEmptyHandSelection(fixture);
+            checkRefillReadiness(fixture);
             checkWaterlogging(fixture);
         } finally {
             set(MinecraftClient.class, null, "instance", previous);
@@ -183,9 +184,7 @@ public final class InteractionRegressionChecks {
         FixturePlayer player = fixture.player;
         FixtureInteraction interaction = fixture.interaction;
         PlayerScreenHandler screen = player.playerScreenHandler;
-        Constructor<InventoryManager> constructor = InventoryManager.class.getDeclaredConstructor();
-        constructor.setAccessible(true);
-        InventoryManager manager = constructor.newInstance();
+        InventoryManager manager = newInventoryManager();
         SchematicBlockState state = (SchematicBlockState) unsafe.allocateInstance(SchematicBlockState.class);
         set(SchematicBlockState.class, state, "currentState", Blocks.LEVER.getDefaultState());
         set(SchematicBlockState.class, state, "targetState", Blocks.LEVER.getDefaultState().with(LeverBlock.POWERED, true));
@@ -237,6 +236,67 @@ public final class InteractionRegressionChecks {
         player.currentScreenHandler = other;
         check(!manager.select(ItemStack.EMPTY), "Open container guard was bypassed");
         player.currentScreenHandler = screen;
+    }
+
+    private static void checkRefillReadiness(Fixture fixture) throws Exception {
+        FixturePlayer player = fixture.player;
+        FixtureInteraction interaction = fixture.interaction;
+        InventoryManager manager = newInventoryManager();
+        int previousDelay = PrinterConfig.INVENTORY_DELAY.getIntegerValue();
+        try {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(3);
+            PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("1,3,5");
+            InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+            ItemStack stone = new ItemStack(Items.STONE);
+            ItemStack dirt = new ItemStack(Items.DIRT);
+            ItemStack sand = new ItemStack(Items.SAND, 16);
+            ItemStack gravel = new ItemStack(Items.GRAVEL, 16);
+            fill(player, stone);
+            player.inventory.selectedSlot = 0;
+            player.inventory.main.set(4, dirt);
+            player.inventory.main.set(12, sand);
+            player.inventory.main.set(13, gravel);
+            int before = interaction.swaps;
+
+            check(!manager.prefetch(sand, List.of(stone, dirt)) && interaction.swaps == before,
+                    "Prefetch evicted a protected or selected stack");
+            check(manager.prefetch(sand, List.of(dirt)) && interaction.swaps == before + 1,
+                    "Prefetch did not stage the material in the available slot");
+            check(player.inventory.selectedSlot == 0 && player.inventory.main.get(2).isOf(Items.SAND)
+                    && player.inventory.main.get(4).isOf(Items.DIRT), "Prefetch changed the selected or protected slot");
+            check(manager.selectReadyHotbarMaterial(dirt), "Pending refill blocked a disjoint ready hotbar material");
+            check(!manager.selectReadyHotbarMaterial(sand), "Predicted refill was available before the delay");
+            check(!manager.select(gravel) && interaction.swaps == before + 1,
+                    "A second refill started while the first was in flight");
+
+            // Simulate an authoritative update to only the stack displaced into the backpack.
+            player.inventory.main.set(12, new ItemStack(Items.STONE, 2));
+            while (manager.delay > 0) manager.tick();
+            check(!manager.selectReadyHotbarMaterial(sand), "Refill ignored a source-only correction");
+            check(manager.selectReadyHotbarMaterial(dirt), "Source correction blocked a disjoint hotbar slot");
+            manager.tick();
+            check(manager.selectReadyHotbarMaterial(sand), "Refill did not recover after re-reading the inventory");
+
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(0);
+            PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("3");
+            InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+            check(!manager.canPrefetch() && manager.canStartRefill(), "Selected refill slot was treated as unavailable");
+            check(!manager.prefetch(gravel, List.of()) && interaction.swaps == before + 1,
+                    "Prefetch evicted the only refill slot while it was selected");
+            check(!manager.select(gravel) && interaction.swaps == before + 2 && manager.delay == 1,
+                    "Demand refill did not use the selected fallback with the minimum delay");
+            check(!manager.selectReadyHotbarMaterial(gravel), "Zero-delay refill skipped the minimum wait");
+            manager.tick();
+            check(manager.selectReadyHotbarMaterial(gravel), "Selected fallback did not settle");
+        } finally {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(previousDelay);
+        }
+    }
+
+    private static InventoryManager newInventoryManager() throws Exception {
+        Constructor<InventoryManager> constructor = InventoryManager.class.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        return constructor.newInstance();
     }
 
     private static void fill(FixturePlayer player, ItemStack stack) {

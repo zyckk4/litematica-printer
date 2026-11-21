@@ -31,6 +31,19 @@ final class MovingPrinterAction extends Action {
     }
 
     @Nullable
+    static ItemStack requiredMaterial(SchematicBlockState state, ClientPlayerEntity player) {
+        if (state.targetState.getBlock() instanceof AbstractRailBlock rail && state.currentState.isReplaceable()) {
+            ItemStack stack = new ItemStack(rail);
+            return Printer.inventoryManager.hasMaterial(stack) ? stack : null;
+        }
+        if (tuningProperty(state.targetState) != null && CycleStateGuide.needsInteraction(state.currentState, state.targetState)) {
+            return new CycleStateGuide(state).canExecute(player) ? ItemStack.EMPTY : null;
+        }
+        WaterLogGuide water = new WaterLogGuide(state);
+        return water.canExecute(player) ? water.requiredMaterial(player) : null;
+    }
+
+    @Nullable
     static MovingPrinterAction prepare(SchematicBlockState state, ClientPlayerEntity player, double reach) {
         if (state.targetState.getBlock() instanceof AbstractRailBlock rail && state.currentState.isReplaceable()) {
             return prepareRail(state, rail, player, reach);

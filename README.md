@@ -67,7 +67,7 @@ The interaction defaults below apply to new configurations or reset options:
 | `printerIgnoreRotation` | `false` | Preserve schematic block orientations |
 | `printerAirPlace` | `true` | Enable airplace for specialized placement handlers |
 | `printerAirPlaceRange` | `4.5` | Range for specialized airplace handlers |
-| `printerInventoryDelay` | `5` | Wait after replenishment; try `10` at high latency |
+| `printerInventoryDelay` | `5` | Client ticks before using a refilled slot or starting another refill. Other ready hotbar slots remain usable. The default is `10` and can help at high latency. |
 | `printerHotbarSlots` | `3,4,5,6,7,8,9` | Use slots 3–9 as refill destinations |
 | `printerDisableInGuis` | `true` | Pause while a screen is open |
 

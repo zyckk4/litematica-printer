@@ -165,79 +165,16 @@ public class Printer {
         boolean nativeEnabled = PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()
                 || PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
         if (nativeEnabled && (!moving || PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue())) {
-            NativePlacementSolver.Solution batchSolution = null;
-            ItemStack batchStack = null;
-            Set<BlockPos> chestNeighborsInBatch = new java.util.HashSet<>();
-            Set<BlockPos> playerOccupied = Set.copyOf(getBlocksPlayerOccupied());
-            List<BlockPos> candidates = positions.stream().filter(pos -> isNativePlacementCandidate(
-                    new SchematicBlockState(player.getEntityWorld(), worldSchematic, pos), playerOccupied)).toList();
-            int attempts = Math.min(candidates.size(), 24);
-            int start = candidates.isEmpty() ? 0 : Math.floorMod(scanCursor, candidates.size());
-            long solveDeadline = System.nanoTime() + 3_000_000L;
-            int examined = 0;
-            for (int i = 0; i < attempts; i++) {
-                if (i > 0 && System.nanoTime() >= solveDeadline) break;
-                examined++;
-                BlockPos position = candidates.get((start + i) % candidates.size());
-                BlockState finalState = LogStrippingGuide.placementTarget(player, worldSchematic.getBlockState(position));
-                // Adjacent chests change one another's type. The second half
-                // must be solved after the first server update, not against
-                // the same empty client world in this batch.
-                if (finalState.getBlock() instanceof ChestBlock && chestNeighborsInBatch.contains(position)) continue;
-                BlockState desired = NativePlacementSolver.placementTarget(mc.world, worldSchematic, position, finalState);
-                ItemStack required = MaterialCache.getInstance().getRequiredBuildItemForState(
-                        PlacementStages.initialTarget(finalState), worldSchematic, position);
-                if (required.isEmpty() || !inventoryManager.hasMaterial(required)) continue;
-                if (batchStack != null && !ItemStack.areItemsAndComponentsEqual(batchStack, required)) continue;
-                boolean allowAir = PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
-                NativePlacementSolver.Solution solution;
-                if (batchSolution != null) {
-                    // Ordinary and directional targets may share a batch if
-                    // they work at the same already-selected server angles.
-                    solution = PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()
-                            ? NativePlacementSolver.solveMovingAtRotation(position, desired, required,
-                                    getEffectivePrintingRange(), allowAir, player.isSprinting(),
-                                    batchSolution.yaw(), batchSolution.pitch())
-                            : NativePlacementSolver.solveAnyRotation(position, desired, required, getEffectivePrintingRange());
-                } else {
-                    // The solver checks rotation-independent placement itself;
-                    // do not repeat that full hit/angle scan for every target.
-                    if (PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) {
-                        solution = moving
-                                ? NativePlacementSolver.solveMoving(position, desired, required,
-                                        getEffectivePrintingRange(), allowAir, player.isSprinting())
-                                : NativePlacementSolver.solveStationary(position, desired, required,
-                                        getEffectivePrintingRange(), allowAir);
-                    } else {
-                        solution = allowAir ? NativePlacementSolver.solveAnyRotation(
-                                position, desired, required, getEffectivePrintingRange()) : null;
-                    }
-                }
-                if (solution == null) continue;
-                if (!solution.anyRotation() && !PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) continue;
-                if (batchSolution == null) {
-                    // A refill stages the stack for a later tick. No old hit or
-                    // rotation is retained while waiting for inventory changes.
-                    if (!inventoryManager.select(required)) return false;
-                    if (!solution.anyRotation() && !MovementHandler.requestRotation(solution.yaw(), solution.pitch())) continue;
-                    batchSolution = solution;
-                    batchStack = required;
-                    actionHandler.clearLookAction();
-                }
-                BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
-                nativeActions.add(new NativePlacementAction(position, actionTarget, required, solution));
-                if (finalState.getBlock() instanceof ChestBlock) {
-                    for (Direction side : Direction.Type.HORIZONTAL) chestNeighborsInBatch.add(position.offset(side));
-                }
-                if (nativeActions.size() >= PrinterConfig.NATIVE_BURST.getIntegerValue()) break;
-            }
-            scanCursor = start + examined;
-            if (!nativeActions.isEmpty()) return true;
+            if (planNativePlacements(worldSchematic, positions, moving)) return true;
         }
         if (moving && nativeEnabled && !PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()) return false;
         List<Action> batchedActions = new ArrayList<>();
         AirplaceBatchKey batchKey = null;
         int batchedChains = 0;
+        List<Action> deferredGuide = List.of();
+        ItemStack deferredMaterial = null;
+        List<SchematicBlockState> deferredMoving = new ArrayList<>();
+        List<ItemStack> readyGuideMaterials = new ArrayList<>();
 
         long guideDeadline = System.nanoTime() + 3_000_000L;
         int guideStart = positions.isEmpty() ? 0 : Math.floorMod(guideCursor, positions.size());
@@ -250,6 +187,12 @@ public class Printer {
             if (state.targetState.equals(state.currentState) || state.targetState.isAir()) continue;
             if (pendingPlacements.containsKey(position)) continue;
             if (moving && nativeEnabled) {
+                ItemStack material = MovingPrinterAction.requiredMaterial(state, player);
+                if (material == null) continue;
+                if (!inventoryManager.hasReadyHotbarMaterial(material)) {
+                    deferredMoving.add(state);
+                    continue;
+                }
                 MovingPrinterAction action = MovingPrinterAction.prepare(state, player, getEffectivePrintingRange());
                 if (action == null) continue;
                 actionHandler.clearLookAction();
@@ -271,6 +214,14 @@ public class Printer {
             for (Guide guide : guides) {
                 if (guide.canExecute(player)) {
                     List<Action> actions = guide.execute(player);
+                    ItemStack material = guide.requiredMaterial(player);
+                    if (!actions.isEmpty() && material != null && !inventoryManager.hasReadyHotbarMaterial(material)) {
+                        if (deferredGuide.isEmpty()) {
+                            deferredGuide = actions;
+                            deferredMaterial = material;
+                        }
+                        continue findBlock;
+                    }
                     AirplaceBatchKey candidateKey = getAirplaceBatchKey(actions);
 
                     // Non-airplace interactions may require a different
@@ -278,6 +229,9 @@ public class Printer {
                     // original one-chain behaviour for those interactions.
                     if (candidateKey == null) {
                         if (batchedActions.isEmpty()) {
+                            if (!actions.isEmpty() && deferredMaterial != null && !player.getAbilities().creativeMode) {
+                                inventoryManager.prefetch(deferredMaterial, material == null ? List.of() : List.of(material));
+                            }
                             actionHandler.addActions(actions.toArray(Action[]::new));
                             return true;
                         }
@@ -291,6 +245,7 @@ public class Printer {
                     }
 
                     batchedActions.addAll(actions);
+                    if (material != null) readyGuideMaterials.add(material);
                     batchedChains++;
                     if (batchedChains >= PrinterConfig.NATIVE_BURST.getIntegerValue()) {
                         break findBlock;
@@ -305,12 +260,134 @@ public class Printer {
         }
 
         if (!batchedActions.isEmpty()) {
+            if (deferredMaterial != null && !player.getAbilities().creativeMode) {
+                inventoryManager.prefetch(deferredMaterial, readyGuideMaterials);
+            }
             actionHandler.addActions(batchedActions.toArray(Action[]::new));
             return true;
         }
 
+        if (!deferredGuide.isEmpty() && inventoryManager.canStartRefill()) {
+            actionHandler.addActions(deferredGuide.toArray(Action[]::new));
+            return true;
+        }
+        if (!deferredMoving.isEmpty() && inventoryManager.canStartRefill()) {
+            for (SchematicBlockState state : deferredMoving) {
+                guideCursor = positions.indexOf(state.blockPos) + 1;
+                MovingPrinterAction action = MovingPrinterAction.prepare(state, player, getEffectivePrintingRange());
+                if (action != null) {
+                    actionHandler.clearLookAction();
+                    nativeActions.add(action);
+                    return true;
+                }
+                if (!inventoryManager.canStartRefill() || System.nanoTime() >= guideDeadline) break;
+            }
+        }
+
         return false;
     }
+
+    private boolean planNativePlacements(WorldSchematic schematic, List<BlockPos> positions, boolean moving) {
+        Set<BlockPos> occupied = Set.copyOf(getBlocksPlayerOccupied());
+        List<BlockPos> candidates = positions.stream().filter(pos -> isNativePlacementCandidate(
+                new SchematicBlockState(player.getEntityWorld(), schematic, pos), occupied)).toList();
+        if (candidates.isEmpty()) return false;
+
+        List<NativeTarget> ready = new ArrayList<>();
+        List<NativeTarget> refill = new ArrayList<>();
+        int start = Math.floorMod(scanCursor, candidates.size());
+        int attempts = Math.min(candidates.size(), 24);
+        for (int offset = 0; offset < attempts; offset++) {
+            BlockPos pos = candidates.get((start + offset) % candidates.size());
+            BlockState target = LogStrippingGuide.placementTarget(player, schematic.getBlockState(pos));
+            ItemStack stack = MaterialCache.getInstance().getRequiredBuildItemForState(
+                    PlacementStages.initialTarget(target), schematic, pos);
+            if (stack.isEmpty()) continue;
+            if (inventoryManager.hasReadyNativeMaterial(stack)) {
+                ready.add(new NativeTarget(pos, target, stack, offset));
+            } else if (!inventoryManager.hasReadyHotbarMaterial(stack) && inventoryManager.hasMaterial(stack)) {
+                refill.add(new NativeTarget(pos, target, stack, offset));
+            }
+        }
+
+        long deadline = System.nanoTime() + 3_000_000L;
+        ItemStack batchStack = null;
+        NativePlacementSolver.Solution batchSolution = null;
+        Set<BlockPos> chestNeighbors = new java.util.HashSet<>();
+        int lastExamined = -1;
+        for (NativeTarget target : ready) {
+            if (lastExamined >= 0 && System.nanoTime() >= deadline) break;
+            lastExamined = target.offset();
+            if (batchStack != null && !ItemStack.areItemsAndComponentsEqual(batchStack, target.stack())) continue;
+            // Adjacent chests must be solved after the first server update.
+            if (target.state().getBlock() instanceof ChestBlock && chestNeighbors.contains(target.pos())) continue;
+            BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
+            NativePlacementSolver.Solution solution = solveNative(target, desired, moving, batchSolution);
+            if (solution == null) continue;
+            if (batchSolution == null) {
+                if (!inventoryManager.selectReadyHotbarMaterial(target.stack()) || !prepareNativeRotation(solution)) continue;
+                batchSolution = solution;
+                batchStack = target.stack();
+                actionHandler.clearLookAction();
+            }
+            addNativePlacement(target, desired, solution);
+            if (target.state().getBlock() instanceof ChestBlock) {
+                for (Direction side : Direction.Type.HORIZONTAL) chestNeighbors.add(target.pos().offset(side));
+            }
+            if (nativeActions.size() >= PrinterConfig.NATIVE_BURST.getIntegerValue()) break;
+        }
+
+        scanCursor = start + (lastExamined >= 0 ? lastExamined + 1 : attempts);
+        boolean hasBatch = !nativeActions.isEmpty();
+        if (hasBatch && !inventoryManager.canPrefetch()) return true;
+        if (!hasBatch && !inventoryManager.canStartRefill()) return false;
+        List<ItemStack> keepInHotbar = hasBatch ? ready.stream().map(NativeTarget::stack).toList() : List.of();
+        boolean triedRefill = false;
+        for (NativeTarget target : refill) {
+            if ((triedRefill || hasBatch) && System.nanoTime() >= deadline) break;
+            triedRefill = true;
+            BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
+            NativePlacementSolver.Solution solution = solveNative(target, desired, moving, null);
+            if (solution == null) continue;
+            if (hasBatch) {
+                inventoryManager.prefetch(target.stack(), keepInHotbar);
+            } else if (inventoryManager.select(target.stack()) && prepareNativeRotation(solution)) {
+                // Creative selection can immediately supply the item. Survival re-plans after the refill.
+                actionHandler.clearLookAction();
+                addNativePlacement(target, desired, solution);
+            }
+            break;
+        }
+        return !nativeActions.isEmpty();
+    }
+
+    @Nullable
+    private NativePlacementSolver.Solution solveNative(NativeTarget target, BlockState desired, boolean moving,
+                                                       @Nullable NativePlacementSolver.Solution batch) {
+        double reach = getEffectivePrintingRange();
+        boolean allowAir = PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
+        if (!PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) {
+            return allowAir ? NativePlacementSolver.solveAnyRotation(target.pos(), desired, target.stack(), reach) : null;
+        }
+        if (batch != null) {
+            return NativePlacementSolver.solveMovingAtRotation(target.pos(), desired, target.stack(), reach, allowAir,
+                    player.isSprinting(), batch.yaw(), batch.pitch());
+        }
+        return moving ? NativePlacementSolver.solveMoving(target.pos(), desired, target.stack(), reach, allowAir, player.isSprinting())
+                : NativePlacementSolver.solveStationary(target.pos(), desired, target.stack(), reach, allowAir);
+    }
+
+    private boolean prepareNativeRotation(NativePlacementSolver.Solution solution) {
+        return solution.anyRotation() || (PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()
+                && MovementHandler.requestRotation(solution.yaw(), solution.pitch()));
+    }
+
+    private void addNativePlacement(NativeTarget target, BlockState desired, NativePlacementSolver.Solution solution) {
+        BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
+        nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution));
+    }
+
+    private record NativeTarget(BlockPos pos, BlockState state, ItemStack stack, int offset) {}
 
     private boolean isNativePlacementCandidate(SchematicBlockState state, java.util.Set<BlockPos> playerOccupied) {
         if (state.targetState == null || state.targetState.isAir()) return false;
