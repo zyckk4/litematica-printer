@@ -198,6 +198,11 @@ final class StateInteractionTestFixture implements AutoCloseable {
         Map<BlockPos, BlockState> blocks;
         private FixtureSchematic() { super(null, null, null, null); }
         @Override public BlockState getBlockState(BlockPos pos) { return blocks.getOrDefault(pos, Blocks.AIR.getDefaultState()); }
+        @Override public boolean setBlockState(BlockPos pos, BlockState state, int flags) {
+            // MaterialCache reapplies the state before selecting its item.
+            if (getBlockState(pos) != state) throw new AssertionError("Unexpected write to the fixture schematic");
+            return false;
+        }
     }
     static final class FixtureWorld extends ClientWorld {
         Map<BlockPos, BlockState> blocks;

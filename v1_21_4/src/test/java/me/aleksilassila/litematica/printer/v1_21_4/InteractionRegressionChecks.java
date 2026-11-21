@@ -69,6 +69,7 @@ import sun.misc.Unsafe;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -164,6 +165,7 @@ public final class InteractionRegressionChecks {
         unsafeField.setAccessible(true);
         Unsafe unsafe = (Unsafe) unsafeField.get(null);
         MinecraftClient client = (MinecraftClient) unsafe.allocateInstance(MinecraftClient.class);
+        set(MinecraftClient.class, client, "runDirectory", Path.of(".").toAbsolutePath().toFile());
         FixturePlayer player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
         player.inventory = new PlayerInventory(player);
         player.abilities = new PlayerAbilities();

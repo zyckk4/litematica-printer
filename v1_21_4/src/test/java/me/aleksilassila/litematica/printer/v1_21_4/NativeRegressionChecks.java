@@ -27,9 +27,9 @@ public final class NativeRegressionChecks {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
         if (java.util.Arrays.asList(args).contains("--state-interactions")) {
+            int interactionChecks = InteractionRegressionChecks.run();
             int movingChecks = MovingStateRegressionChecks.run();
             int sneakChecks = LegacySneakRegressionChecks.run();
-            int interactionChecks = InteractionRegressionChecks.run();
             System.out.println("Focused state interaction checks passed: " + movingChecks
                     + " moving-state assertions; " + sneakChecks + " legacy-sneak assertions; "
                     + interactionChecks + " existing interaction assertions.");
