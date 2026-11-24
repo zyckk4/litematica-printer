@@ -81,13 +81,13 @@ public final class InteractionRegressionChecks {
         MinecraftClient previous = MinecraftClient.getInstance();
         String slots = PrinterConfig.PRINTER_HOTBAR_SLOTS.getStringValue();
         try {
-            Fixture fixture = createFixture();
-            checkEmptyHandSelection(fixture);
-            checkRefillReadiness(fixture);
-            checkAuthoritativeRefillRecovery(fixture);
-            checkRefillSessionChange(fixture);
-            checkRefillPlayerReplacement(fixture);
-            checkWaterlogging(fixture);
+            checkEmptyHandSelection(createFixture());
+            checkRefillReadiness(createFixture());
+            checkAuthoritativeRefillRecovery(createFixture());
+            checkGroupFences(createFixture());
+            checkRefillSessionChange(createFixture());
+            checkRefillPlayerReplacement(createFixture());
+            checkWaterlogging(createFixture());
         } finally {
             set(MinecraftClient.class, null, "instance", previous);
             PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString(slots);
@@ -165,6 +165,7 @@ public final class InteractionRegressionChecks {
         unsafeField.setAccessible(true);
         Unsafe unsafe = (Unsafe) unsafeField.get(null);
         MinecraftClient client = (MinecraftClient) unsafe.allocateInstance(MinecraftClient.class);
+        set(MinecraftClient.class, client, "runDirectory", new java.io.File("."));
         FixturePlayer player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
         player.inventory = (PlayerInventory) unsafe.allocateInstance(PlayerInventory.class);
         set(PlayerInventory.class, player.inventory, "main", DefaultedList.ofSize(36, ItemStack.EMPTY));
@@ -243,6 +244,8 @@ public final class InteractionRegressionChecks {
         publishSlot(fixture, manager, 12, moved.copy());
         check(!manager.select(ItemStack.EMPTY), "A stale hotbar revision completed a backpack-only update");
         publishSlot(fixture, manager, 2, ItemStack.EMPTY);
+        check(!manager.select(ItemStack.EMPTY), "Released an empty hotbar from a pre-click snapshot");
+        manager.onInventoryReadbackBarrier(fixture.network);
         check(manager.select(ItemStack.EMPTY), "Authoritative empty hand was not selected");
         check(player.inventory.selectedSlot == 2, "Selected outside configured empty-hand staging slot");
         check(player.offhand.isOf(Items.TORCH) && player.offhand.getCount() == 12, "Offhand changed");
@@ -269,7 +272,8 @@ public final class InteractionRegressionChecks {
             ItemStack dirt = new ItemStack(Items.DIRT);
             ItemStack sand = new ItemStack(Items.SAND, 16);
             ItemStack gravel = new ItemStack(Items.GRAVEL, 16);
-            fill(player, stone);
+            fill(player, new ItemStack(Items.COBBLESTONE));
+            player.inventory.main.set(2, stone);
             player.inventory.selectedSlot = 0;
             player.inventory.main.set(4, dirt);
             player.inventory.main.set(12, sand);
@@ -296,6 +300,7 @@ public final class InteractionRegressionChecks {
                     "Repeated hotbar updates were mistaken for both endpoints");
             check(manager.selectReadyHotbarMaterial(dirt), "Partial correction blocked a disjoint hotbar slot");
             publishSlot(fixture, manager, 12, stone.copy());
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(manager.selectReadyHotbarMaterial(sand), "Exact authoritative pair did not settle immediately");
 
             PrinterConfig.INVENTORY_DELAY.setIntegerValue(0);
@@ -310,6 +315,7 @@ public final class InteractionRegressionChecks {
             player.inventory.main.set(13, sand.copy());
             player.inventory.main.set(2, gravel.copy());
             publishInventory(fixture, manager);
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(manager.selectReadyHotbarMaterial(gravel), "Full authoritative snapshot did not settle selected fallback");
         } finally {
             PrinterConfig.INVENTORY_DELAY.setIntegerValue(previousDelay);
@@ -360,7 +366,7 @@ public final class InteractionRegressionChecks {
             player.inventory.main.set(12, stone.copy());
             player.inventory.main.set(2, sand.copy());
             publishInventory(fixture, manager);
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(manager.selectReadyHotbarMaterial(sand) && fixture.network.inventorySwaps == before + 1
                             && fixture.network.inventoryReadbacks == probes,
                     "A late matching snapshot did not release the quarantined destination");
@@ -380,16 +386,17 @@ public final class InteractionRegressionChecks {
             player.currentScreenHandler = other;
             manager.onAuthoritativeInventory(other.syncId, handler.getRevision() + 1, handler.slots.size());
             advanceInventoryTicks(fixture, manager, 30);
-            check(!manager.select(dirt) && !manager.canStartRefill() && fixture.network.statisticsRequests == fences + 1,
+            check(!manager.select(dirt) && !manager.canStartRefill() && fixture.network.statisticsRequests == fences + 2,
                     "An open container allowed selection, refill, or a player-inventory readback");
             player.currentScreenHandler = handler;
             check(!manager.canStartRefill(), "A foreign container update completed the active refill");
+            set(ScreenHandler.class, handler, "revision", (handler.getRevision() + 0x4000) & 0x7fff);
             advanceInventoryTicks(fixture, manager, 30);
             check(fixture.network.inventorySwaps == before + 2 && fixture.network.inventoryReadbacks == probes
                             && fixture.network.statisticsRequests == fences + 2,
                     "Closing the container replayed the mutation or failed to order its readback");
             int revisionBeforeProbe = handler.getRevision();
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(fixture.network.inventoryReadbacks == probes + 1 && fixture.network.statisticsRequests == fences + 3,
                     "The first fence did not issue one readback followed by its own fence");
             ClickSlotC2SPacket probe = fixture.network.latestReadback;
@@ -402,7 +409,7 @@ public final class InteractionRegressionChecks {
             check(!manager.selectReadyHotbarMaterial(gravel), "A short inventory update released the slot");
             publishInventory(fixture, manager);
             check(!manager.selectReadyHotbarMaterial(gravel), "A mismatched readback released the slot before its fence");
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(manager.selectReadyHotbarMaterial(gravel), "A fenced readback did not expose authoritative inventory");
             check(!manager.canStartRefill(), "Readback recovery did not back off before a new mutation");
             advanceInventoryTicks(fixture, manager, 30);
@@ -412,10 +419,10 @@ public final class InteractionRegressionChecks {
             check(!manager.select(sand) && fixture.network.inventorySwaps == before + 3,
                     "Could not start a fresh refill after backoff");
             advanceInventoryTicks(fixture, manager, 30);
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(fixture.network);
             publishInventory(fixture, manager);
             check(!manager.selectReadyHotbarMaterial(gravel), "An unchanged readback released a silent refusal too early");
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(manager.selectReadyHotbarMaterial(gravel) && fixture.network.inventorySwaps == before + 3,
                     "Recovering a silent refusal replayed the original click");
             advanceInventoryTicks(fixture, manager, 30);
@@ -425,8 +432,8 @@ public final class InteractionRegressionChecks {
             advanceInventoryTicks(fixture, manager, 30);
             // This is a full snapshot, but it precedes the readback request.
             publishInventory(fixture, manager);
-            manager.onInventoryReadbackBarrier();
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(fixture.network);
+            manager.onInventoryReadbackBarrier(fixture.network);
             check(!manager.selectReadyHotbarMaterial(gravel) && !manager.canStartRefill()
                             && fixture.network.inventorySwaps == before + 4,
                     "A snapshot preceding the readback released a still-ambiguous mutation");
@@ -434,6 +441,88 @@ public final class InteractionRegressionChecks {
             player.currentScreenHandler = handler;
             PrinterConfig.INVENTORY_DELAY.setIntegerValue(previousDelay);
         }
+    }
+
+    private static void checkGroupFences(Fixture fixture) throws Exception {
+        InventoryManager manager = newInventoryManager();
+        FixturePlayer player = fixture.player;
+        PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("2,3,4");
+        InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+        ItemStack dirt = new ItemStack(Items.DIRT, 8);
+        ItemStack bricks = new ItemStack(Items.BRICKS, 8);
+        ItemStack sand = new ItemStack(Items.SAND, 8);
+        ItemStack gravel = new ItemStack(Items.GRAVEL, 4);
+        fill(player, dirt);
+        player.inventory.main.set(9, bricks.copy());
+        player.inventory.main.set(10, sand.copy());
+        player.inventory.main.set(11, gravel.copy());
+        var first = new InventoryManager.Refill(9, 1);
+        var second = new InventoryManager.Refill(10, 2);
+        var third = new InventoryManager.Refill(11, 3);
+        check(!manager.startSwapGroup(player, List.of(first, new InventoryManager.Refill(9, 2)))
+                        && !manager.startSwapGroup(player, List.of(first, new InventoryManager.Refill(10, 1)))
+                        && fixture.network.inventorySwaps == 0, "An overlapping group partially moved inventory");
+        // A plain statistics screen opened before the printer request. Its reply must not
+        // unlock a group even when an earlier authoritative snapshot has the desired layout.
+        fixture.network.sendPacket(new ClientStatusC2SPacket(ClientStatusC2SPacket.Mode.REQUEST_STATS));
+        check(manager.startSwapGroup(player, List.of(first, second, third))
+                        && fixture.network.inventorySwaps == 3 && fixture.network.statisticsRequests == 2,
+                "A disjoint batch did not send all three clicks followed by one owned fence");
+        for (int source : new int[]{9, 10, 11}) player.inventory.main.set(source, dirt.copy());
+        player.inventory.main.set(1, bricks.copy());
+        player.inventory.main.set(2, sand.copy());
+        player.inventory.main.set(3, gravel.copy());
+        publishInventory(fixture, manager);
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(!manager.selectReadyHotbarMaterial(bricks) && !manager.selectReadyHotbarMaterial(sand)
+                        && !manager.selectReadyHotbarMaterial(gravel) && manager.selectReadyHotbarMaterial(dirt),
+                "A matching snapshot and someone else's stats reply released part of the group");
+        // Vanilla executes the real click after the earlier snapshot, restoring the old
+        // values of this pair. The other two pairs must stay reserved until the full refresh.
+        publishSlot(fixture, manager, 1, dirt.copy());
+        publishSlot(fixture, manager, 9, bricks.copy());
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(fixture.network.inventoryReadbacks == 1 && fixture.network.statisticsRequests == 3
+                        && !manager.selectReadyHotbarMaterial(sand), "An incomplete group skipped the fenced readback");
+        publishInventory(fixture, manager);
+        player.inventory.selectedSlot = 3;
+        check(player.inventory.dropSelectedItem(false).getCount() == 1, "Local drop did not change the reserved stack");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        advanceInventoryTicks(fixture, manager, 220);
+        check(fixture.network.inventoryReadbacks == 2 && fixture.network.statisticsRequests == 4
+                        && fixture.network.inventorySwaps == 3 && !manager.canStartRefill(),
+                "A changed readback never retried safely or retransmitted the material group");
+        publishInventory(fixture, manager);
+        advanceInventoryTicks(fixture, manager, 1200);
+        check(!manager.selectReadyHotbarMaterial(gravel) && !manager.canStartRefill()
+                        && fixture.network.inventoryReadbacks == 2 && fixture.network.inventorySwaps == 3,
+                "An unacknowledged retry released or retransmitted a pending group");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        advanceInventoryTicks(fixture, manager, 220);
+        check(manager.selectReadyHotbarMaterial(gravel) && manager.canStartRefill()
+                        && !manager.hasReadyNativeMaterial(bricks), "A fresh valid snapshot did not recover the actual inventory");
+
+        // No inventory mutation is needed to recount an exhausted stack. Drain all earlier
+        // uses first, then accept only a fresh full readback followed by its own ordered reply.
+        int priorReads = fixture.network.inventoryReadbacks;
+        check(manager.requestStockReadback(3) && manager.isReservedHotbar(player, 3)
+                        && !manager.requestStockReadback(2), "Stock recount did not reserve exactly one transaction");
+        publishInventory(fixture, manager);
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(fixture.network.inventoryReadbacks == priorReads + 1 && manager.isReservedHotbar(player, 3),
+                "A publication from before the stock probe released the slot");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        advanceInventoryTicks(fixture, manager, 220);
+        check(fixture.network.inventoryReadbacks == priorReads + 2 && manager.isReservedHotbar(player, 3),
+                "The stock readback accepted a stale snapshot or failed to retry");
+        publishInventory(fixture, manager);
+        check(!manager.selectReadyHotbarMaterial(gravel) && manager.selectReadyHotbarMaterial(sand),
+                "A stock readback exposed its slot early or blocked disjoint work");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(manager.selectReadyHotbarMaterial(gravel) && fixture.network.inventorySwaps == 3,
+                "The stock readback did not settle without mutating inventory");
+        PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("3");
+        InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
     }
 
     private static void advanceInventoryTicks(Fixture fixture, InventoryManager manager, int ticks) {
@@ -524,13 +613,13 @@ public final class InteractionRegressionChecks {
                     "Recovery did not order a new-player inventory refresh");
             PlayerScreenHandler handler = replacement.player.playerScreenHandler;
             int revision = handler.getRevision();
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(connection);
             check(connection.inventoryReadbacks == probes + 1 && connection.statisticsRequests == fences + 2
                             && connection.latestReadback.revision() == (revision ^ 0x4000),
                     "Readback did not use the replacement player's handler revision");
             publishInventory(replacement, manager);
             check(!manager.selectReadyHotbarMaterial(sand), "Rebound refill was released before the final fence");
-            manager.onInventoryReadbackBarrier();
+            manager.onInventoryReadbackBarrier(connection);
             check(manager.selectReadyHotbarMaterial(sand) && connection.inventorySwaps == swaps + 1,
                     "Fenced replacement-player inventory did not recover without another SWAP");
 
@@ -553,7 +642,7 @@ public final class InteractionRegressionChecks {
         check(!manager.select(gravel) && connection.inventorySwaps == swaps + 1,
                 "Did not send the refill for the readback-interruption check");
         advanceInventoryTicks(replacement, manager, 30);
-        manager.onInventoryReadbackBarrier();
+        manager.onInventoryReadbackBarrier(connection);
         player.inventory.main.set(13, sand.copy());
         player.inventory.main.set(2, gravel.copy());
         publishInventory(replacement, manager);
@@ -562,16 +651,15 @@ public final class InteractionRegressionChecks {
         player.currentScreenHandler = other;
         manager.tick();
         player.currentScreenHandler = handler;
-        manager.onInventoryReadbackBarrier();
+        manager.onInventoryReadbackBarrier(connection);
         check(!manager.selectReadyHotbarMaterial(gravel) && connection.inventorySwaps == swaps + 1,
                 "Closing a container allowed an interrupted readback to release its destination");
 
         advanceInventoryTicks(replacement, manager, 30);
-        manager.onInventoryReadbackBarrier();
-        check(connection.inventoryReadbacks == probes + 2 && connection.statisticsRequests == fences + 4,
+        check(connection.inventoryReadbacks == probes + 2 && connection.statisticsRequests == fences + 3,
                 "Interrupted refresh did not restart with an ordered readback");
         publishInventory(replacement, manager);
-        manager.onInventoryReadbackBarrier();
+        manager.onInventoryReadbackBarrier(connection);
         check(manager.selectReadyHotbarMaterial(gravel) && connection.inventorySwaps == swaps + 1,
                 "Restarted readback did not recover without replaying the refill");
     }
@@ -1328,6 +1416,7 @@ public final class InteractionRegressionChecks {
                 }
             }
             if (packet instanceof ClientStatusC2SPacket status && status.getMode() == ClientStatusC2SPacket.Mode.REQUEST_STATS) {
+                InventoryFenceOrder.get(this).sent(status);
                 statisticsRequests++;
             }
         }

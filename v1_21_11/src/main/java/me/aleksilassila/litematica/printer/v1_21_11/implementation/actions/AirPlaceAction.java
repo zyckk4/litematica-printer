@@ -28,7 +28,6 @@ public class AirPlaceAction extends InteractAction {
                 || !context.canPlace()) return ActionResult.FAIL;
         BlockPos target = context.getBlockPos();
         ItemStack held = player.getMainHandStack();
-        if (!player.getAbilities().creativeMode && held.getCount() <= Printer.pendingItemCount(held)) return ActionResult.FAIL;
         if (!(held.getItem() instanceof BlockItem item)
                 || !ItemStack.areItemsAndComponentsEqual(held, context.getStack())
                 || Printer.hasPendingPlacement(target)

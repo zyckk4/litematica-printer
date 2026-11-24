@@ -32,6 +32,7 @@ public final class NativeRegressionChecks {
             int movingChecks = MovingStateRegressionChecks.run();
             int sneakChecks = SneakRecoveryChecks.run();
             int interactionChecks = InteractionRegressionChecks.run();
+            InventorySchedulingChecks.run();
             System.out.println("Focused state interaction checks passed: " + movingChecks
                     + " moving-state assertions; " + sneakChecks + " sneak-recovery assertions; "
                     + interactionChecks + " existing interaction assertions.");
@@ -48,6 +49,7 @@ public final class NativeRegressionChecks {
         int placementChecks = NativePlacementContextChecks.run();
         int solverChecks = NativePlacementSolverChecks.run();
         int interactionChecks = InteractionRegressionChecks.run();
+        InventorySchedulingChecks.run();
         int conversionChecks = SchematicConversionRegressionChecks.run();
         int movingChecks = MovingStateRegressionChecks.run();
         int sneakChecks = SneakRecoveryChecks.run();

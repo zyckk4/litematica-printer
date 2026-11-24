@@ -62,6 +62,7 @@ public class Printer {
     public static int inactivityCounter = 0;
     static final LinkedList<BlockTimeout> blockPosTimeout = new LinkedList<>();
     private static final Map<BlockPos, PendingPlacement> pendingPlacements = new HashMap<>();
+    private static final Map<Integer, SlotStock> pendingStock = new HashMap<>();
     private static Object predictionWorld;
     private static final PlacementRateLimiter placementRate = new PlacementRateLimiter();
     int delayCounter = 0;
@@ -71,6 +72,7 @@ public class Printer {
     public Printer(@NotNull MinecraftClient client, @NotNull ClientPlayerEntity player) {
         this.player = player;
         pendingPlacements.clear();
+        resetStock();
         blockPosTimeout.clear();
         placementRate.reset();
         inventoryManager.onPrinterContextChanged();
@@ -151,7 +153,9 @@ public class Printer {
         if (PrinterConfig.PRINTER_DISABLE_IN_GUIS.getBooleanValue()) {
             if (mc.currentScreen != null) return false;
         }
-        if (!actionHandler.acceptsActions() || !canAcquirePlacementPacket() || player.isUsingItem()) return false;
+        if (!actionHandler.acceptsActions() || player.isUsingItem()) return false;
+        boolean placementBudget = canAcquirePlacementPacket();
+        if (!placementBudget && !inventoryManager.canPrefetch()) return false;
 
         List<BlockPos> positions = getReachablePositions();
 
@@ -165,8 +169,9 @@ public class Printer {
         boolean nativeEnabled = PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()
                 || PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
         if (nativeEnabled && (!moving || PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue())) {
-            if (planNativePlacements(worldSchematic, positions, moving)) return true;
+            if (planNativePlacements(worldSchematic, positions, moving, placementBudget)) return true;
         }
+        if (!placementBudget) return false;
         if (moving && nativeEnabled && !PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()) return false;
         List<Action> batchedActions = new ArrayList<>();
         AirplaceBatchKey batchKey = null;
@@ -287,7 +292,7 @@ public class Printer {
         return false;
     }
 
-    private boolean planNativePlacements(WorldSchematic schematic, List<BlockPos> positions, boolean moving) {
+    private boolean planNativePlacements(WorldSchematic schematic, List<BlockPos> positions, boolean moving, boolean placementBudget) {
         Set<BlockPos> occupied = Set.copyOf(getBlocksPlayerOccupied());
         List<BlockPos> candidates = positions.stream().filter(pos -> isNativePlacementCandidate(
                 new SchematicBlockState(player.getEntityWorld(), schematic, pos), occupied)).toList();
@@ -305,32 +310,32 @@ public class Printer {
             if (stack.isEmpty()) continue;
             if (inventoryManager.hasReadyNativeMaterial(stack)) {
                 ready.add(new NativeTarget(pos, target, stack, offset));
-            } else if (!inventoryManager.hasReadyHotbarMaterial(stack) && inventoryManager.hasMaterial(stack)) {
+            } else if (inventoryManager.hasMaterial(stack)) {
                 refill.add(new NativeTarget(pos, target, stack, offset));
             }
         }
 
         long deadline = System.nanoTime() + 3_000_000L;
-        ItemStack batchStack = null;
         NativePlacementSolver.Solution batchSolution = null;
+        List<ItemStack> keep = new ArrayList<>();
         Set<BlockPos> chestNeighbors = new java.util.HashSet<>();
         int lastExamined = -1;
         for (NativeTarget target : ready) {
+            if (!placementBudget) break;
             if (lastExamined >= 0 && System.nanoTime() >= deadline) break;
             lastExamined = target.offset();
-            if (batchStack != null && !ItemStack.areItemsAndComponentsEqual(batchStack, target.stack())) continue;
             // Adjacent chests must be solved after the first server update.
             if (target.state().getBlock() instanceof ChestBlock && chestNeighbors.contains(target.pos())) continue;
             BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
             NativePlacementSolver.Solution solution = solveNative(target, desired, moving, batchSolution);
             if (solution == null) continue;
             if (batchSolution == null) {
-                if (!inventoryManager.selectReadyHotbarMaterial(target.stack()) || !prepareNativeRotation(solution)) continue;
+                if (!inventoryManager.selectReadyNativeMaterial(target.stack()) || !prepareNativeRotation(solution)) continue;
                 batchSolution = solution;
-                batchStack = target.stack();
                 actionHandler.clearLookAction();
             }
             addNativePlacement(target, desired, solution);
+            keep.add(target.stack());
             if (target.state().getBlock() instanceof ChestBlock) {
                 for (Direction side : Direction.Type.HORIZONTAL) chestNeighbors.add(target.pos().offset(side));
             }
@@ -341,23 +346,28 @@ public class Printer {
         boolean hasBatch = !nativeActions.isEmpty();
         if (hasBatch && !inventoryManager.canPrefetch()) return true;
         if (!hasBatch && !inventoryManager.canStartRefill()) return false;
-        List<ItemStack> keepInHotbar = hasBatch ? ready.stream().map(NativeTarget::stack).toList() : List.of();
+        if (!placementBudget) ready.forEach(target -> keep.add(target.stack()));
+        List<ItemStack> wanted = new ArrayList<>(3);
         boolean triedRefill = false;
         for (NativeTarget target : refill) {
-            if ((triedRefill || hasBatch) && System.nanoTime() >= deadline) break;
+            if (wanted.stream().anyMatch(stack -> ItemStack.areItemsAndComponentsEqual(stack, target.stack()))) continue;
+            if (triedRefill && System.nanoTime() >= deadline) break;
             triedRefill = true;
             BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
             NativePlacementSolver.Solution solution = solveNative(target, desired, moving, null);
             if (solution == null) continue;
-            if (hasBatch) {
-                inventoryManager.prefetch(target.stack(), keepInHotbar);
-            } else if (inventoryManager.select(target.stack()) && prepareNativeRotation(solution)) {
-                // Creative selection can immediately supply the item. Survival re-plans after the refill.
-                actionHandler.clearLookAction();
-                addNativePlacement(target, desired, solution);
+            if (player.getAbilities().creativeMode) {
+                if (placementBudget && !hasBatch && inventoryManager.select(target.stack()) && prepareNativeRotation(solution)) {
+                    actionHandler.clearLookAction();
+                    addNativePlacement(target, desired, solution);
+                }
+                break;
             }
-            break;
+            int demand = (int) refill.stream().filter(other -> ItemStack.areItemsAndComponentsEqual(target.stack(), other.stack())).count();
+            wanted.add(target.stack().copyWithCount(demand));
+            if (wanted.size() == 3) break;
         }
+        inventoryManager.stageMaterials(wanted, keep, !hasBatch && placementBudget);
         return !nativeActions.isEmpty();
     }
 
@@ -384,7 +394,7 @@ public class Printer {
 
     private void addNativePlacement(NativeTarget target, BlockState desired, NativePlacementSolver.Solution solution) {
         BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
-        nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution));
+        nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution, true));
     }
 
     private record NativeTarget(BlockPos pos, BlockState state, ItemStack stack, int offset) {}
@@ -596,17 +606,62 @@ public class Printer {
         // ACK only acknowledges processing, not success. Wait for block state
         // packets, with a bounded retry if no authoritative state arrives.
         int waitTicks = MathHelper.clamp((latency * 2 + 750) / 50, 15, 60);
-        pendingPlacements.put(pos.toImmutable(), new PendingPlacement(desired, stack.copyWithCount(1),
-                sequence, waitTicks));
+        PendingPlacement pending = new PendingPlacement(desired, stack.copyWithCount(1), sequence, waitTicks);
+        pendingPlacements.put(pos.toImmutable(), pending);
+        if (sequence >= 0 && stack.getItem() instanceof net.minecraft.item.BlockItem && client.player != null
+                && !client.player.getAbilities().creativeMode) {
+            int slot = client.player.getInventory().getSelectedSlot();
+            ItemStack held = client.player.getInventory().getStack(slot);
+            if (ItemStack.areItemsAndComponentsEqual(held, stack)) {
+                SlotStock stock = pendingStock.computeIfAbsent(slot, ignored -> new SlotStock(held));
+                pending.stockSlot = slot;
+                pending.stockCheckTick = client.player.age + waitTicks;
+                stock.uses.add(pending);
+            }
+        }
     }
 
     public static boolean hasPendingPlacement(BlockPos pos) {
         return pendingPlacements.containsKey(pos);
     }
 
-    public static int pendingItemCount(ItemStack stack) {
-        return (int) pendingPlacements.values().stream()
-                .filter(pending -> ItemStack.areItemsAndComponentsEqual(stack, pending.stack)).count();
+    public static int pendingSlotCount(int slot, ItemStack held) {
+        SlotStock stock = pendingStock.get(slot);
+        if (stock == null) return 0;
+        // Until an authority publishes a replacement, a local edit cannot turn an outstanding use into credit.
+        return ItemStack.areItemsAndComponentsEqual(stock.item, held) ? stock.uses.size() : Integer.MAX_VALUE;
+    }
+
+    static void resetStock() {
+        pendingStock.clear();
+    }
+
+    /** Reconcile uses against the inventory stream independently of world block publications. */
+    public static void observeHotbarContent(int slot, ItemStack content) {
+        SlotStock stock = pendingStock.get(slot);
+        if (stock == null) return;
+        int count = ItemStack.areItemsAndComponentsEqual(stock.item, content) ? content.getCount() : 0;
+        int spent = stock.publishedCount - count;
+        for (PendingPlacement use : stock.uses) {
+            if (spent <= 0) break;
+            if (!use.stockPublished) {
+                use.stockPublished = true;
+                spent--;
+            }
+        }
+        stock.publishedCount = count;
+        settleStock(slot, stock);
+    }
+
+    private static void settleStock(int slot, SlotStock stock) {
+        stock.uses.removeIf(use -> use.stockPublished && use.blockPublished);
+        if (stock.uses.isEmpty()) pendingStock.remove(slot);
+    }
+
+    /** The manager kept this slot reserved from the ordered refresh request through its response. */
+    public static void reconcileHotbarSlot(int slot, ItemStack actual) {
+        var player = MinecraftClient.getInstance().player;
+        if (player != null && ItemStack.areEqual(actual, player.getInventory().getStack(slot))) pendingStock.remove(slot);
     }
 
     /** Invoked on the client thread after vanilla applies a block update. */
@@ -617,6 +672,11 @@ public class Printer {
             if (property != null && !actual.get(property).equals(pending.desired.get(property))) return;
         }
         pendingPlacements.remove(pos);
+        if (pending != null && pending.stockSlot >= 0) {
+            pending.blockPublished = true;
+            SlotStock stock = pendingStock.get(pending.stockSlot);
+            if (stock != null) settleStock(pending.stockSlot, stock);
+        }
         if (pending != null && PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
             if (pending.stack.isOf(net.minecraft.item.Items.WATER_BUCKET)) {
                 boolean filled = actual.isOf(pending.desired.getBlock())
@@ -634,12 +694,21 @@ public class Printer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (predictionWorld != client.world) {
             pendingPlacements.clear();
+            resetStock();
             blockPosTimeout.clear();
             placementRate.reset();
             inventoryManager.onPrinterContextChanged();
             predictionWorld = client.world;
         }
         pendingPlacements.entrySet().removeIf(entry -> --entry.getValue().ticks <= 0);
+        if (client.player != null) {
+            for (var entry : pendingStock.entrySet()) {
+                if (entry.getValue().uses.stream().anyMatch(use -> client.player.age - use.stockCheckTick >= 0)) {
+                    inventoryManager.requestStockReadback(entry.getKey());
+                    break;
+                }
+            }
+        }
     }
 
     public void onServerCorrection() {
@@ -654,12 +723,27 @@ public class Printer {
         private final ItemStack stack;
         private final int sequence;
         private int ticks;
+        private int stockSlot = -1;
+        private int stockCheckTick;
+        private boolean blockPublished;
+        private boolean stockPublished;
 
         private PendingPlacement(BlockState desired, ItemStack stack, int sequence, int ticks) {
             this.desired = desired;
             this.stack = stack;
             this.sequence = sequence;
             this.ticks = ticks;
+        }
+    }
+
+    private static final class SlotStock {
+        final ItemStack item;
+        int publishedCount;
+        final List<PendingPlacement> uses = new ArrayList<>();
+
+        SlotStock(ItemStack stack) {
+            item = stack.copyWithCount(1);
+            publishedCount = stack.getCount();
         }
     }
 

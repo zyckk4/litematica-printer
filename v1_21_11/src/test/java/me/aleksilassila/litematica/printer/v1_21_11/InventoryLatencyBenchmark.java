@@ -61,12 +61,24 @@ final class InventoryLatencyBenchmark {
             runScenario("authoritative-count-mismatch", 1, 10, false, Fault.COUNT_MISMATCH_FIRST, baselineTickOrder, true);
             runScenario("original-updates-withheld", 1, 10, false, Fault.WITHHOLD_FIRST, baselineTickOrder, true);
             runScenario("readback-fence-withheld", 1, 10, false, Fault.WITHHOLD_FENCE, baselineTickOrder, true);
+            runScenario("matching-snapshot-before-swap", 1, 10, true, Fault.EARLIER_MATCH, baselineTickOrder, true);
+            runScenario("group-reply-withheld", 1, 10, false, Fault.WITHHOLD_GROUP_REPLY, baselineTickOrder, true);
+            runScenario("partially-accepted-group", PALETTE.size(), 10, true, Fault.REJECT_MIDDLE, baselineTickOrder, true);
+            runScenario("fragmented-backpack", 1, 10, false, Fault.NONE, baselineTickOrder, true, Layout.FRAGMENTED_BACKPACK);
+            runScenario("fragmented-hotbar", 1, 10, false, Fault.NONE, baselineTickOrder, true, Layout.FRAGMENTED_HOTBAR);
         }
     }
 
     private static void runScenario(String name, int materials, int delay, boolean jitter,
                                     Fault fault, boolean baselineTickOrder,
                                     boolean authoritative) throws Exception {
+        runScenario(name, materials, delay, jitter, fault, baselineTickOrder, authoritative, Layout.DEFAULT);
+    }
+
+    private enum Layout { DEFAULT, FRAGMENTED_BACKPACK, FRAGMENTED_HOTBAR }
+
+    private static void runScenario(String name, int materials, int delay, boolean jitter, Fault fault,
+                                    boolean baselineTickOrder, boolean authoritative, Layout layout) throws Exception {
         try (StateInteractionTestFixture fixture = new StateInteractionTestFixture()) {
             fixture.enableInventoryPacketApplication();
             fixture.configure(PrinterConfig.INVENTORY_DELAY, delay);
@@ -85,10 +97,21 @@ final class InventoryLatencyBenchmark {
                     fixture.world.blocks.put(pos.down(), Blocks.STONE.getDefaultState());
                 }
             }
-            if (fault.singleRefill) {
+            if (layout == Layout.FRAGMENTED_BACKPACK) {
+                for (int slot = 9; slot < 25; slot++) fixture.player.inventory.main.set(slot, new ItemStack(PALETTE.getFirst()));
+                fixture.player.inventory.main.set(25, new ItemStack(PALETTE.getFirst(), 48));
+            } else if (layout == Layout.FRAGMENTED_HOTBAR) {
+                while (expected.size() > 7) expected.remove(expected.keySet().iterator().next());
+                for (int slot = 2; slot < 9; slot++) fixture.player.inventory.main.set(slot, new ItemStack(PALETTE.getFirst()));
+            } else if (fault.singleRefill) {
                 expected.clear();
                 expected.put(StateInteractionTestFixture.TARGET, PALETTE.getLast().getDefaultState());
                 fixture.player.inventory.main.set(9, new ItemStack(PALETTE.getLast(), 64));
+                if (fault == Fault.EARLIER_MATCH) {
+                    fixture.player.inventory.main.set(2, new ItemStack(Blocks.DIRT, 8));
+                    PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("3");
+                    InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+                }
             } else {
                 for (int i = 0; i < materials; i++) {
                     // Fill the seven writable hotbar slots before using main inventory.
@@ -139,7 +162,8 @@ final class InventoryLatencyBenchmark {
                     server.firstUseWrong, server.usesDuringSettle, server.usesPendingDestination,
                     server.overlappingSwapsDuringSettle, server.maxInFlightSwaps,
                     server.completeTick, clientComplete, server.inventoryMatches());
-            if (fault == Fault.WITHHOLD_FENCE) {
+            boolean mustStayLocked = fault == Fault.WITHHOLD_FENCE || fault == Fault.WITHHOLD_GROUP_REPLY;
+            if (mustStayLocked) {
                 if (clientComplete != -1 || server.placementAttempts != 0 || server.materialSwaps != 1) {
                     throw new AssertionError("Tried to use or retry a refill after the recovery fence was withheld");
                 }
@@ -150,12 +174,19 @@ final class InventoryLatencyBenchmark {
                 throw new AssertionError("Failed to complete " + name + " with exact blocks and inventory. " +
                         "Incorrect or missing targets: " + incorrect);
             }
-            if (materials == 1 && fault == Fault.NONE && server.materialSwaps != 0) {
+            if (server.failedPlacements != 0 || server.firstUseRejected != 0 || server.firstUseEmpty != 0
+                    || server.firstUseWrong != 0 || (!mustStayLocked && server.placementAttempts != expected.size())) {
+                throw new AssertionError("Unexpected placement or rejected use in " + name);
+            }
+            if (layout == Layout.FRAGMENTED_BACKPACK && server.materialSwaps != 1) {
+                throw new AssertionError("Fragmented backpack should supply 48 blocks in one refill");
+            }
+            if (materials == 1 && fault == Fault.NONE && layout != Layout.FRAGMENTED_BACKPACK && server.materialSwaps != 0) {
                 throw new AssertionError("A cache-only job attempted to refill");
             }
             int expectedRawSwaps = authoritative ? server.materialSwaps : 0;
             if (server.rawSwaps != expectedRawSwaps) throw new AssertionError("Unexpected refill wire path");
-            if (fault == Fault.REJECT_FIRST && server.rejectedSwaps != 1) {
+            if ((fault == Fault.REJECT_FIRST || fault == Fault.REJECT_MIDDLE) && server.rejectedSwaps != 1) {
                 throw new AssertionError("The planned server rejection did not happen");
             }
             if (authoritative) verifyFaultResponse(fault, server);
@@ -176,14 +207,17 @@ final class InventoryLatencyBenchmark {
                 throw new AssertionError("Expected one readback and a scoped full inventory with the planned fence response");
             }
         }
-        if (fault == Fault.REJECT_FIRST && (server.readbacks < 1 || server.statsResponses < 2)) {
+        if (fault == Fault.EARLIER_MATCH && (server.materialSwaps != 2 || server.readbacks < 1)) {
+            throw new AssertionError("The pre-click inventory must lead to reconciliation and fresh planning");
+        }
+        if ((fault == Fault.REJECT_FIRST || fault == Fault.REJECT_MIDDLE) && (server.readbacks < 1 || server.statsResponses < 2)) {
             throw new AssertionError("Expected a fenced authoritative readback after the rejected swap");
         }
     }
 
     private enum Fault {
         NONE(false), REJECT_FIRST(false), SPLIT_FIRST(true), COUNT_MISMATCH_FIRST(true),
-        WITHHOLD_FIRST(true), WITHHOLD_FENCE(true);
+        WITHHOLD_FIRST(true), WITHHOLD_FENCE(true), WITHHOLD_GROUP_REPLY(true), EARLIER_MATCH(true), REJECT_MIDDLE(false);
 
         private final boolean singleRefill;
 
@@ -229,7 +263,7 @@ final class InventoryLatencyBenchmark {
         private int firstUseEmpty;
         private int firstUseWrong;
         private int settleUntil;
-        private SwapObservation latestSwap;
+        private SwapGroup group;
         private int usesDuringSettle;
         private int usesPendingDestination;
         private int overlappingSwapsDuringSettle;
@@ -267,7 +301,7 @@ final class InventoryLatencyBenchmark {
         }
 
         private boolean swapOutstanding() {
-            return latestSwap != null && (authoritative ? !latestSwap.complete() : tick < settleUntil);
+            return group != null && (authoritative ? !group.complete() : tick < settleUntil);
         }
 
         void submitPredictedSwap(int source, int destination) {
@@ -280,11 +314,23 @@ final class InventoryLatencyBenchmark {
 
         private void submitSwap(int source, int destination, int revision,
                                 ItemStack sourcePrediction, ItemStack destinationPrediction) {
-            if (swapOutstanding()) overlappingSwapsDuringSettle++;
+            if (!swapOutstanding()) group = new SwapGroup(tick);
+            boolean reusedEndpoint = group.swaps.stream().anyMatch(swap -> swap.source == source || swap.destination == destination);
+            if (reusedEndpoint || group.initialStatsRequested || group.swaps.size() >= 3 || group.submittedTick != tick) {
+                overlappingSwapsDuringSettle++;
+                throw new AssertionError("Concurrent refills must belong to one disjoint, bounded group");
+            }
             materialSwaps++;
             settleUntil = tick + Math.max(1, delay);
-            SwapObservation swap = new SwapObservation(source, destination, materialSwaps == 1, tick);
-            latestSwap = swap;
+            SwapObservation swap = new SwapObservation(source, destination, materialSwaps == 1, group);
+            group.swaps.add(swap);
+            if (fault == Fault.EARLIER_MATCH && swap.first) {
+                ItemStack old = inventory.get(destination);
+                inventory.set(destination, inventory.get(source));
+                inventory.set(source, old);
+                sendInventory(null, false);
+                group.recoveryRequired = true;
+            }
             inFlightSwaps++;
             maxInFlightSwaps = Math.max(maxInFlightSwaps, inFlightSwaps);
             uplink.enqueue(tick, () -> applySwap(swap, revision, sourcePrediction, destinationPrediction));
@@ -296,26 +342,28 @@ final class InventoryLatencyBenchmark {
             int source = swap.source;
             int destination = swap.destination;
             waitingForFirstUse.add(destination);
-            if (fault == Fault.REJECT_FIRST && swap.first) {
+            boolean rejectMiddle = fault == Fault.REJECT_MIDDLE && rejectedSwaps == 0
+                    && swap.group.swaps.size() >= 2 && swap == swap.group.swaps.get(1);
+            if ((fault == Fault.REJECT_FIRST && swap.first) || rejectMiddle) {
                 rejectedSwaps++;
-                swap.recoveryRequired = true;
-                sendInventory(swap, false);
+                swap.group.recoveryRequired = true;
+                sendInventory(swap.group, false);
                 return;
             }
             ItemStack displaced = inventory.get(destination);
             ItemStack incoming = inventory.get(source);
             if (swap.first && fault == Fault.COUNT_MISMATCH_FIRST) {
                 incoming.decrement(1);
-                swap.recoveryRequired = true;
+                swap.group.recoveryRequired = true;
             }
             inventory.set(destination, incoming);
             inventory.set(source, displaced);
             if (swap.first && (fault == Fault.WITHHOLD_FIRST || fault == Fault.WITHHOLD_FENCE)) {
-                swap.recoveryRequired = true;
+                swap.group.recoveryRequired = true;
                 return;
             }
             if (revision != serverRevision) {
-                sendInventory(swap, false);
+                sendInventory(swap.group, false);
                 return;
             }
             dirtySlots.remove(source);
@@ -358,7 +406,7 @@ final class InventoryLatencyBenchmark {
             });
         }
 
-        private void sendInventory(SwapObservation swap, boolean readback) {
+        private void sendInventory(SwapGroup observer, boolean readback) {
             corrections++;
             dirtySlots.clear();
             List<ItemStack> snapshot = new ArrayList<>(java.util.Collections.nCopies(
@@ -369,7 +417,7 @@ final class InventoryLatencyBenchmark {
             int revision = advanceRevision();
             downlink.enqueue(tick, () -> {
                 fixture.network.onInventory(new InventoryS2CPacket(0, revision, snapshot, ItemStack.EMPTY));
-                if (swap != null) swap.noteInventory(readback);
+                if (observer != null) observer.noteInventory(readback);
             });
         }
 
@@ -391,15 +439,15 @@ final class InventoryLatencyBenchmark {
             }
             int destination = click.button();
             if (click.slot() == toScreenSlot(destination)) {
-                SwapObservation swap = latestSwap;
-                if (swap == null || !swap.initialStatsSeen || swap.probeSent || destination != swap.destination
+                SwapGroup active = group;
+                if (active == null || !active.initialStatsSeen || active.probeSent || !active.usesDestination(destination)
                         || click.revision() != (fixture.player.playerScreenHandler.getRevision() ^ 0x4000)) {
                     throw new AssertionError("Unexpected recovery readback packet: " + click);
                 }
                 readbacks++;
-                swap.probeSent = true;
+                active.probeSent = true;
                 uplink.enqueue(tick, () -> {
-                    if (click.revision() != serverRevision) sendInventory(swap, true);
+                    if (click.revision() != serverRevision) sendInventory(active, true);
                 });
                 return;
             }
@@ -414,8 +462,8 @@ final class InventoryLatencyBenchmark {
         }
 
         void verifyNoPostSendPrediction() {
-            if (authoritative && latestSwap != null && latestSwap.submittedTick == tick) {
-                verifyEndpointsUnchanged(latestSwap.source, latestSwap.destination);
+            if (authoritative && group != null && group.submittedTick == tick) {
+                for (SwapObservation swap : group.swaps) verifyEndpointsUnchanged(swap.source, swap.destination);
             }
         }
 
@@ -438,14 +486,14 @@ final class InventoryLatencyBenchmark {
                 if (placement.getHand() != Hand.MAIN_HAND) throw new AssertionError("Unexpected offhand path");
                 if (swapOutstanding()) {
                     usesDuringSettle++;
-                    if (fixture.player.inventory.selectedSlot == latestSwap.destination) usesPendingDestination++;
+                    if (group.usesDestination(fixture.player.inventory.selectedSlot)) usesPendingDestination++;
                 }
                 uplink.enqueue(tick, () -> place(placement));
             }
         }
 
         private void submitStatsFence() {
-            SwapObservation swap = latestSwap;
+            SwapGroup swap = group;
             if (swap == null) throw new AssertionError("Unexpected stats fence without a pending refill");
             boolean initial = !swap.initialStatsRequested;
             if (initial) {
@@ -458,7 +506,7 @@ final class InventoryLatencyBenchmark {
             }
             statsRequests++;
             uplink.enqueue(tick, () -> {
-                if (!initial && fault == Fault.WITHHOLD_FENCE) return;
+                if ((!initial && fault == Fault.WITHHOLD_FENCE) || (initial && fault == Fault.WITHHOLD_GROUP_REPLY)) return;
                 // Delay the second fence so a full inventory alone cannot release a recovery.
                 downlink.enqueue(tick, initial ? 0 : 1, () -> {
                     if (initial) swap.initialStatsSeen = true;
@@ -525,9 +573,26 @@ final class InventoryLatencyBenchmark {
         private final int source;
         private final int destination;
         private final boolean first;
-        private final int submittedTick;
+        private final SwapGroup group;
         private boolean sourceSeen;
         private boolean destinationSeen;
+
+        SwapObservation(int source, int destination, boolean first, SwapGroup group) {
+            this.source = source;
+            this.destination = destination;
+            this.first = first;
+            this.group = group;
+        }
+
+        void noteSlot(int slot) {
+            if (slot == source) sourceSeen = true;
+            if (slot == destination) destinationSeen = true;
+        }
+    }
+
+    private static final class SwapGroup {
+        private final List<SwapObservation> swaps = new ArrayList<>(3);
+        private final int submittedTick;
         private boolean recoveryRequired;
         private boolean initialStatsRequested;
         private boolean initialStatsSeen;
@@ -536,26 +601,25 @@ final class InventoryLatencyBenchmark {
         private boolean recoveryInventorySeen;
         private boolean statsSeen;
 
-        SwapObservation(int source, int destination, boolean first, int submittedTick) {
-            this.source = source;
-            this.destination = destination;
-            this.first = first;
+        SwapGroup(int submittedTick) {
             this.submittedTick = submittedTick;
         }
 
-        void noteSlot(int slot) {
-            if (slot == source) sourceSeen = true;
-            if (slot == destination) destinationSeen = true;
+        boolean usesDestination(int slot) {
+            return swaps.stream().anyMatch(swap -> swap.destination == slot);
         }
 
         void noteInventory(boolean readback) {
-            sourceSeen = true;
-            destinationSeen = true;
+            for (SwapObservation swap : swaps) {
+                swap.sourceSeen = true;
+                swap.destinationSeen = true;
+            }
             if (readback) recoveryInventorySeen = true;
         }
 
         boolean complete() {
-            return recoveryRequired ? recoveryInventorySeen && statsSeen : sourceSeen && destinationSeen;
+            if (recoveryRequired) return recoveryInventorySeen && statsSeen;
+            return initialStatsSeen && swaps.stream().allMatch(swap -> swap.sourceSeen && swap.destinationSeen);
         }
     }
 

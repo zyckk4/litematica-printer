@@ -31,6 +31,7 @@ import net.minecraft.item.Items;
 import net.minecraft.network.PacketApplyBatcher;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
+import net.minecraft.network.packet.c2s.play.ClientStatusC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.screen.PlayerScreenHandler;
@@ -267,6 +268,9 @@ final class StateInteractionTestFixture implements AutoCloseable {
         @Override public net.minecraft.client.network.PlayerListEntry getPlayerListEntry(java.util.UUID uuid) { return null; }
         @Override public void sendPacket(Packet<?> packet) {
             if (packet instanceof PlayerInputC2SPacket && inputFailure != null) throw inputFailure;
+            if (packet instanceof ClientStatusC2SPacket status && status.getMode() == ClientStatusC2SPacket.Mode.REQUEST_STATS) {
+                InventoryFenceOrder.get(this).sent(status);
+            }
             packets.add(packet);
             if (packet instanceof PlayerInputC2SPacket input) inputs.add(input.input());
             if (packet instanceof PlayerInteractBlockC2SPacket block) blockPackets.add(block);

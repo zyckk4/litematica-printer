@@ -21,22 +21,30 @@ public final class NativePlacementAction extends Action {
     private final BlockState desired;
     private final ItemStack stack;
     private final NativePlacementSolver.Solution solution;
+    private final boolean selectMaterial;
 
     public NativePlacementAction(BlockPos target, BlockState desired, ItemStack stack,
                                  NativePlacementSolver.Solution solution) {
+        this(target, desired, stack, solution, false);
+    }
+
+    public NativePlacementAction(BlockPos target, BlockState desired, ItemStack stack,
+                                 NativePlacementSolver.Solution solution, boolean selectMaterial) {
         this.target = target.toImmutable();
         this.desired = desired;
         this.stack = stack.copyWithCount(1);
         this.solution = solution;
+        this.selectMaterial = selectMaterial;
     }
 
     @Override
     public boolean send(MinecraftClient client, ClientPlayerEntity player) {
         if (client.world == null || client.interactionManager == null || client.getNetworkHandler() == null
                 || Printer.hasPendingPlacement(target)) return false;
+        if (selectMaterial && !Printer.inventoryManager.selectReadyNativeMaterial(stack)) return false;
+        if (!Printer.inventoryManager.canUseSelectedSlot(player)) return false;
         ItemStack held = player.getMainHandStack();
         if (!ItemStack.areItemsAndComponentsEqual(held, stack)) return false;
-        if (!player.getAbilities().creativeMode && held.getCount() <= Printer.pendingItemCount(stack)) return false;
         if (!solution.anyRotation() && !MovementHandler.sentRotationMatches(solution.yaw(), solution.pitch())) return false;
         double reach = Math.min(LitematicaMixinMod.PRINTING_RANGE.getDoubleValue(), player.getBlockInteractionRange());
         NativePlacementSolver.Solution checked = NativePlacementSolver.revalidate(target, desired, held, solution,

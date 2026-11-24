@@ -67,9 +67,13 @@ The interaction defaults below apply to new configurations or reset options:
 | `printerIgnoreRotation` | `false` | Preserve schematic block orientations |
 | `printerAirPlace` | `true` | Enable airplace for specialized placement handlers |
 | `printerAirPlaceRange` | `4.5` | Range for specialized airplace handlers |
-| `printerInventoryDelay` | `10` | Client ticks before requesting inventory recovery, with a minimum of 10. A refill can be used as soon as both slots are confirmed by the server. Other ready hotbar slots remain usable. |
+| `printerInventoryDelay` | `10` | Inventory recovery interval in client ticks, with a minimum of 10. Survival printing can stage up to three materials that use distinct slots. The printer checks every exchanged slot after the server processes the group. Other ready slots remain usable. |
 | `printerHotbarSlots` | `3,4,5,6,7,8,9` | Use slots 3–9 as refill destinations |
 | `printerDisableInGuis` | `true` | Pause while a screen is open |
+
+Survival refills use the vanilla statistics reply to verify that the server
+has processed the slot exchanges. If a server withholds this reply, the printer
+keeps the affected slots reserved and can continue using other ready slots.
 
 Keep `printerRotatePlayer`, `printerFreeLook` and `printerNativeGrimAirplace`
 disabled for this setup. Either native mode leaves the local camera in control.
@@ -196,6 +200,10 @@ gameplay and server acceptance require a client test.
 For the focused moving-state and temporary-sneak regression checks, run
 `./gradlew :v1_21_11:nativeRegression --args=--state-interactions`
 (use `.\gradlew.bat` on Windows).
+
+Run `./gradlew :v1_21_11:nativeRegression --args=--inventory-latency` to test
+inventory synchronization, fragmented stacks and mixed-material throughput at
+200 ms simulated latency.
 
 After committing the reviewed files and building from a clean working tree,
 run `python scripts/prepare_release.py` with Python 3.11 or newer to create local

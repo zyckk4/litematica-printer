@@ -12,6 +12,7 @@
     "ConfigsMixin",
     "GuiConfigsMixin",
     "InputHandlerMixin",
+    "InventoryFenceConnectionMixin",
     "MixinAccessorClientPlayerEntity",
     "MixinAccessorKeyBinding",
     "MixinCamera",
