@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.7**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.8**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -32,7 +32,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.7-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.8-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -152,7 +152,7 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.7
+## Remaining issues in 3.4.8
 
 | Area | Trigger and observed code behavior |
 | --- | --- |
