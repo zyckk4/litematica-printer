@@ -8,6 +8,7 @@ import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_11.mixin.MixinAccessorClientPlayerEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.input.Input;
 import net.minecraft.client.network.ClientCommonNetworkHandler;
@@ -82,6 +83,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
         set(MinecraftClient.class, null, "instance", client);
         set(MinecraftClient.class, client, "runDirectory", Path.of(".").toFile());
         player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
+        set(ClientPlayerEntity.class, player, "client", client);
         player.inventory = (PlayerInventory) unsafe.allocateInstance(PlayerInventory.class);
         set(PlayerInventory.class, player.inventory, "main", DefaultedList.ofSize(36, ItemStack.EMPTY));
         player.abilities = new PlayerAbilities();
@@ -101,6 +103,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
         set(ClientPlayerInteractionManager.class, interaction, "client", client);
         set(ClientPlayerInteractionManager.class, interaction, "networkHandler", network);
         world = (FixtureWorld) unsafe.allocateInstance(FixtureWorld.class);
+        world.blockEntities = new HashMap<>();
         world.blocks = new HashMap<>(); world.border = new WorldBorder();
         world.attributes = WorldEnvironmentAttributeAccess.builder().build();
         set(ClientWorld.class, world, "pendingUpdateManager", new PendingUpdateManager());
@@ -117,6 +120,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
         set(MinecraftClient.class, client, "cameraEntity", player);
         client.player = player; client.world = world; client.interactionManager = interaction;
         schematic = (FixtureSchematic) unsafe.allocateInstance(FixtureSchematic.class);
+        schematic.blockEntities = new HashMap<>();
         schematic.blocks = new HashMap<>();
         set(SchematicWorldHandler.class, SchematicWorldHandler.INSTANCE, "world", schematic);
         previousInventoryClient = (MinecraftClient) field(InventoryManager.class, "mc").get(Printer.inventoryManager);
@@ -142,6 +146,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
 
     Printer reset() throws Exception {
         world.blocks.clear(); schematic.blocks.clear();
+        world.blockEntities.clear(); schematic.blockEntities.clear();
         network.packets.clear(); network.inputs.clear(); network.blockPackets.clear();
         network.inputFailure = null;
         network.packetSink = null;
@@ -215,14 +220,18 @@ final class StateInteractionTestFixture implements AutoCloseable {
 
     static final class FixtureSchematic extends WorldSchematic {
         Map<BlockPos, BlockState> blocks;
+        Map<BlockPos, BlockEntity> blockEntities;
         private FixtureSchematic() { super(null, null, null, null); }
+        @Override public BlockEntity getBlockEntity(BlockPos pos) { return blockEntities.get(pos); }
         @Override public BlockState getBlockState(BlockPos pos) { return blocks.getOrDefault(pos, Blocks.AIR.getDefaultState()); }
     }
     static final class FixtureWorld extends ClientWorld {
         Map<BlockPos, BlockState> blocks;
+        Map<BlockPos, BlockEntity> blockEntities;
         WorldBorder border;
         WorldEnvironmentAttributeAccess attributes;
         private FixtureWorld() { super(null, null, null, null, 0, 0, null, false, 0L, 0); }
+        @Override public BlockEntity getBlockEntity(BlockPos pos) { return blockEntities.get(pos); }
         @Override public BlockState getBlockState(BlockPos pos) { return blocks.getOrDefault(pos, Blocks.AIR.getDefaultState()); }
         @Override public net.minecraft.fluid.FluidState getFluidState(BlockPos pos) { return getBlockState(pos).getFluidState(); }
         @Override public boolean isClient() { return true; }

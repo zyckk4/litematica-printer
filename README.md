@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.8**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.9**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -32,7 +32,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.8-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.9-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -61,6 +61,7 @@ The interaction defaults below apply to new configurations or reset options:
 | `printerInteractionWindowMs` | `310` | Rolling window in milliseconds (1–10000); 300 is also configurable |
 | `printerInteractionWindowLimit` | `9` | Maximum interaction attempts in the window (1–64) |
 | `printerTickDelay` | `0` | Attempt each tick within the shared interaction budget |
+| `printerMinSignDelayMs` | `500` | Minimum milliseconds each sign face waits after its edit request. Set to 0 for immediate submission. |
 | `printerStopOnMovement` | `false` | Allow printing while moving |
 | `printerRaycast` | `false` | Allow in-range targets behind obstructions |
 | `printerStrictBlockFaceCheck` | `false` | Allow clicks on the far side of a support block |
@@ -145,14 +146,19 @@ Torches, soul torches and redstone torches preserve the schematic's floor or
 wall attachment, including when `printerIgnoreRotation` is enabled. Both native
 and legacy placement simulate the actual torch item and recheck the required
 support before sending; remove previously misplaced torches manually to reprint.
-Redstone-controlled states follow the surrounding circuit. Sign text is filled
-when an editing screen opens; existing text, back-face text, dye, glow and wax
+Redstone-controlled states follow the surrounding circuit. When the server opens
+a sign face for editing, the printer captures its four schematic lines and
+suppresses the editor. Each sign waits independently for `printerMinSignDelayMs`
+(0–10000 ms). Up to 20 ready faces are submitted per client tick when using a
+delay. Printing can continue during the wait. Releasing the print key still
+allows pending writes to finish while their signs remain within editing reach.
+New signs receive front text. Existing text, back-face text, dye, glow and wax
 are not automatically repaired.
 
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.8
+## Remaining issues in 3.4.9
 
 | Area | Trigger and observed code behavior |
 | --- | --- |

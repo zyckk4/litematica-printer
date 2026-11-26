@@ -23,6 +23,10 @@ public final class NativeRegressionChecks {
     public static void main(String[] args) throws Exception {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
+        if (java.util.Arrays.asList(args).contains("--sign-writes")) {
+            SignWriteChecks.run();
+            return;
+        }
         if (java.util.Arrays.asList(args).contains("--inventory-latency")) {
             InventoryLatencyBenchmark.run(java.util.Arrays.asList(args).contains("--baseline-tick-order"),
                     !java.util.Arrays.asList(args).contains("--timed-refill"));
@@ -51,6 +55,7 @@ public final class NativeRegressionChecks {
         int interactionChecks = InteractionRegressionChecks.run();
         InventorySchedulingChecks.run();
         int conversionChecks = SchematicConversionRegressionChecks.run();
+        SignWriteChecks.run();
         int movingChecks = MovingStateRegressionChecks.run();
         int sneakChecks = SneakRecoveryChecks.run();
         System.out.println("Native regression checks passed: " + assertions

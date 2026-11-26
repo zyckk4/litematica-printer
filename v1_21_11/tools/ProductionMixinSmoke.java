@@ -39,6 +39,7 @@ public final class ProductionMixinSmoke {
                 {"net.minecraft.client.network.ClientPlayerEntity", "printer$movementYaw"},
                 {"net.minecraft.client.network.ClientPlayerEntity", "printer$declareInput"},
                 {"net.minecraft.client.network.ClientPlayerEntity", "printer$flushNativePlacement"},
+                {"net.minecraft.client.network.ClientPlayerEntity", "printer$queueSignText"},
                 {"net.minecraft.entity.Entity", "printer$movementSpeed"},
                 {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$blockUpdate"},
                 {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$correction"},

@@ -33,6 +33,8 @@ public class PrinterConfig {
     }
 
     public static final ConfigInteger TICK_DELAY = new ConfigInteger("printerTickDelay", 0, 0, 100, "Ticks between scans. 0 scans every tick; interactions also obey the configured rolling window and per-tick burst.");
+    public static final ConfigInteger MIN_SIGN_DELAY_MS = new ConfigInteger("printerMinSignDelayMs", 500, 0, 10_000,
+            "Minimum milliseconds from each sign editor request to submitting its text. 0 submits immediately. Delayed edits send up to 20 per client tick.");
     public static final ConfigInteger NATIVE_BURST = new ConfigInteger("printerInteractionBurst", 9, 1, 64,
             "Maximum printer interactions per tick, within the remaining rolling-window budget. Default: 9. Lower this on servers that reject bursts.");
     public static final ConfigInteger INTERACTION_WINDOW_MS = new ConfigInteger("printerInteractionWindowMs", 310, 1, PlacementRateLimiter.MAX_WINDOW_MILLIS,
@@ -82,6 +84,7 @@ public class PrinterConfig {
     public ImmutableList<IConfigBase> getOptions() {
         List<IConfigBase> list = new java.util.ArrayList<>(Configs.Generic.OPTIONS);
         list.add(TICK_DELAY);
+        list.add(MIN_SIGN_DELAY_MS);
         list.add(NATIVE_BURST);
         list.add(INTERACTION_WINDOW_MS);
         list.add(INTERACTION_WINDOW_LIMIT);
