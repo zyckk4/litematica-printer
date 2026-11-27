@@ -19,13 +19,20 @@ import me.aleksilassila.litematica.printer.v1_21_11.actions.NativePlacementActio
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.block.AbstractRailBlock;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.block.FluidBlock;
 import net.minecraft.block.ObserverBlock;
+import net.minecraft.block.PaleMossCarpetBlock;
+import net.minecraft.block.PitcherCropBlock;
+import net.minecraft.block.TallPlantBlock;
+import net.minecraft.block.enums.BedPart;
+import net.minecraft.block.enums.DoubleBlockHalf;
+import net.minecraft.block.enums.WallShape;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.item.ItemStack;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.MultifaceBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -62,6 +69,12 @@ public class Printer {
     public static int inactivityCounter = 0;
     static final LinkedList<BlockTimeout> blockPosTimeout = new LinkedList<>();
     private static final Map<BlockPos, PendingPlacement> pendingPlacements = new HashMap<>();
+    // A compound BlockItem uses one inventory item but publishes each changed cell independently.
+    private static final Map<BlockPos, BlockTimeout> unpublishedCompanions = new HashMap<>();
+    // A retry timeout or an older block update can precede the server processing
+    // this click. Keep its position uncertain for neighboring attachments until
+    // the corresponding vanilla sequence acknowledgement arrives.
+    private static final Map<BlockPos, Integer> unacknowledgedBlocks = new HashMap<>();
     private static final Map<Integer, SlotStock> pendingStock = new HashMap<>();
     private static Object predictionWorld;
     private static final PlacementRateLimiter placementRate = new PlacementRateLimiter();
@@ -72,6 +85,9 @@ public class Printer {
     public Printer(@NotNull MinecraftClient client, @NotNull ClientPlayerEntity player) {
         this.player = player;
         pendingPlacements.clear();
+        unpublishedCompanions.clear();
+        unacknowledgedBlocks.clear();
+        NativeHeadRotation.clear();
         resetStock();
         blockPosTimeout.clear();
         placementRate.reset();
@@ -134,15 +150,22 @@ public class Printer {
 
         if (worldSchematic == null) return false;
 
+        if (!printingRequested()) {
+            NativeHeadRotation.clear();
+            return false;
+        }
+
         if (PrinterConfig.TICK_DELAY.getIntegerValue() != 0 && delayCounter < PrinterConfig.TICK_DELAY.getIntegerValue()) {
             delayCounter++;
+            if (NativeHeadRotation.preferredTarget(player) != null && canRunActions(mc, player)
+                    && actionHandler.acceptsActions() && PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()
+                    && (PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue() || PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue())) {
+                NativeHeadRotation.holdBetweenScans(player);
+            }
             return false;
         } else {
             delayCounter = 0;
         }
-
-        if (!printingRequested())
-            return false;
 
         PlayerAbilities abilities = player.getAbilities();
         if (!abilities.allowModifyWorld)
@@ -159,7 +182,7 @@ public class Printer {
 
         List<BlockPos> positions = getReachablePositions();
 
-        positions = positions.stream().filter(pos -> !pendingPlacements.containsKey(pos)
+        positions = positions.stream().filter(pos -> !hasPendingPlacement(pos)
                 && blockPosTimeout.stream().noneMatch(entry -> entry.pos.equals(pos))).toList();
 
         boolean moving = player.input.getMovementInput().lengthSquared() > 0.0001F
@@ -190,7 +213,7 @@ public class Printer {
             BlockPos position = positions.get((guideStart + index) % positions.size());
             SchematicBlockState state = new SchematicBlockState(player.getEntityWorld(), worldSchematic, position);
             if (state.targetState.equals(state.currentState) || state.targetState.isAir()) continue;
-            if (pendingPlacements.containsKey(position)) continue;
+            if (hasPendingPlacement(position)) continue;
             if (moving && nativeEnabled) {
                 ItemStack material = MovingPrinterAction.requiredMaterial(state, player);
                 if (material == null) continue;
@@ -296,11 +319,14 @@ public class Printer {
         Set<BlockPos> occupied = Set.copyOf(getBlocksPlayerOccupied());
         List<BlockPos> candidates = positions.stream().filter(pos -> isNativePlacementCandidate(
                 new SchematicBlockState(player.getEntityWorld(), schematic, pos), occupied)).toList();
+        BlockPos waitingForHead = NativeHeadRotation.preferredTarget(player);
+        int preferred = waitingForHead == null ? -1 : candidates.indexOf(waitingForHead);
+        if (waitingForHead != null && preferred < 0) NativeHeadRotation.placed(waitingForHead);
         if (candidates.isEmpty()) return false;
 
         List<NativeTarget> ready = new ArrayList<>();
         List<NativeTarget> refill = new ArrayList<>();
-        int start = Math.floorMod(scanCursor, candidates.size());
+        int start = preferred >= 0 ? preferred : Math.floorMod(scanCursor, candidates.size());
         int attempts = Math.min(candidates.size(), 24);
         for (int offset = 0; offset < attempts; offset++) {
             BlockPos pos = candidates.get((start + offset) % candidates.size());
@@ -320,6 +346,7 @@ public class Printer {
         List<ItemStack> keep = new ArrayList<>();
         Set<BlockPos> chestNeighbors = new java.util.HashSet<>();
         int lastExamined = -1;
+        boolean plannedPreferred = false;
         for (NativeTarget target : ready) {
             if (!placementBudget) break;
             if (lastExamined >= 0 && System.nanoTime() >= deadline) break;
@@ -335,6 +362,7 @@ public class Printer {
                 actionHandler.clearLookAction();
             }
             addNativePlacement(target, desired, solution);
+            if (target.pos().equals(waitingForHead)) plannedPreferred = true;
             keep.add(target.stack());
             if (target.state().getBlock() instanceof ChestBlock) {
                 for (Direction side : Direction.Type.HORIZONTAL) chestNeighbors.add(target.pos().offset(side));
@@ -342,6 +370,7 @@ public class Printer {
             if (nativeActions.size() >= PrinterConfig.NATIVE_BURST.getIntegerValue()) break;
         }
 
+        if (preferred >= 0 && placementBudget && !plannedPreferred) NativeHeadRotation.placed(waitingForHead);
         scanCursor = start + (lastExamined >= 0 ? lastExamined + 1 : attempts);
         boolean hasBatch = !nativeActions.isEmpty();
         if (hasBatch && !inventoryManager.canPrefetch()) return true;
@@ -393,7 +422,7 @@ public class Printer {
     }
 
     private void addNativePlacement(NativeTarget target, BlockState desired, NativePlacementSolver.Solution solution) {
-        BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
+        BlockState actionTarget = NativeAttachment.hasFaces(desired) ? solution.predicted() : desired;
         nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution, true));
     }
 
@@ -409,6 +438,7 @@ public class Printer {
         if (!(PlacementStages.initialTarget(state.targetState).getBlock().asItem() instanceof net.minecraft.item.BlockItem)) return false;
         if (playerOccupied.contains(state.blockPos)) return false;
         if (requiresLegacyGuide(state.targetState)) return false;
+        if (hasUnsettledAttachmentNeighbor(state.blockPos, state.targetState)) return false;
         if (state.targetState.getBlock() instanceof ChestBlock) {
             for (Direction side : Direction.Type.HORIZONTAL) {
                 if (hasPendingPlacement(state.blockPos.offset(side))) return false;
@@ -608,6 +638,14 @@ public class Printer {
         int waitTicks = MathHelper.clamp((latency * 2 + 750) / 50, 15, 60);
         PendingPlacement pending = new PendingPlacement(desired, stack.copyWithCount(1), sequence, waitTicks);
         pendingPlacements.put(pos.toImmutable(), pending);
+        if (sequence >= 0 && stack.getItem() instanceof net.minecraft.item.BlockItem) {
+            unacknowledgedBlocks.put(pos.toImmutable(), sequence);
+            BlockPos companion = companionPosition(pos, desired);
+            if (companion != null) {
+                unpublishedCompanions.put(companion, new BlockTimeout(companion, waitTicks));
+                unacknowledgedBlocks.put(companion, sequence);
+            }
+        }
         if (sequence >= 0 && stack.getItem() instanceof net.minecraft.item.BlockItem && client.player != null
                 && !client.player.getAbilities().creativeMode) {
             int slot = client.player.getInventory().getSelectedSlot();
@@ -621,8 +659,37 @@ public class Printer {
         }
     }
 
+    @Nullable
+    private static BlockPos companionPosition(BlockPos pos, BlockState placed) {
+        if (placed.getBlock() instanceof BedBlock && placed.get(BedBlock.PART) == BedPart.FOOT) {
+            return pos.offset(placed.get(BedBlock.FACING));
+        }
+        if (placed.getBlock() instanceof DoorBlock || (placed.getBlock() instanceof TallPlantBlock
+                && !(placed.getBlock() instanceof PitcherCropBlock))) {
+            return placed.get(DoorBlock.HALF) == DoubleBlockHalf.LOWER ? pos.up() : null;
+        }
+        // A lower frond can randomly extend upward on the same side during onPlaced.
+        if (placed.getBlock() instanceof PaleMossCarpetBlock && placed.get(PaleMossCarpetBlock.BOTTOM)
+                && PaleMossCarpetBlock.WALL_SHAPE_PROPERTIES_BY_DIRECTION.values().stream()
+                .anyMatch(side -> placed.get(side) != WallShape.NONE)) return pos.up();
+        return null;
+    }
+
     public static boolean hasPendingPlacement(BlockPos pos) {
-        return pendingPlacements.containsKey(pos);
+        return pendingPlacements.containsKey(pos) || unpublishedCompanions.containsKey(pos);
+    }
+
+    public static boolean hasUnsettledAttachmentNeighbor(BlockPos target, BlockState desired) {
+        if (!NativeAttachment.isSensitive(desired)) return false;
+        for (Direction side : Direction.values()) {
+            BlockPos neighbor = target.offset(side);
+            if (hasPendingPlacement(neighbor) || unacknowledgedBlocks.containsKey(neighbor)) return true;
+        }
+        return false;
+    }
+
+    public static void acknowledgeBlockActions(int sequence) {
+        unacknowledgedBlocks.values().removeIf(sent -> sent <= sequence);
     }
 
     public static int pendingSlotCount(int slot, ItemStack held) {
@@ -666,6 +733,7 @@ public class Printer {
 
     /** Invoked on the client thread after vanilla applies a block update. */
     public static void confirmNativePlacement(BlockPos pos, BlockState actual) {
+        unpublishedCompanions.remove(pos);
         PendingPlacement pending = pendingPlacements.get(pos);
         if (pending != null && pending.stack.isEmpty() && actual.isOf(pending.desired.getBlock())) {
             var property = MovingPrinterAction.tuningProperty(pending.desired);
@@ -694,6 +762,9 @@ public class Printer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (predictionWorld != client.world) {
             pendingPlacements.clear();
+            unpublishedCompanions.clear();
+            unacknowledgedBlocks.clear();
+            NativeHeadRotation.clear();
             resetStock();
             blockPosTimeout.clear();
             placementRate.reset();
@@ -701,6 +772,7 @@ public class Printer {
             predictionWorld = client.world;
         }
         pendingPlacements.entrySet().removeIf(entry -> --entry.getValue().ticks <= 0);
+        unpublishedCompanions.values().removeIf(companion -> --companion.timer <= 0);
         if (client.player != null) {
             for (var entry : pendingStock.entrySet()) {
                 if (entry.getValue().uses.stream().anyMatch(use -> client.player.age - use.stockCheckTick >= 0)) {

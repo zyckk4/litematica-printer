@@ -120,7 +120,7 @@ public final class NativePlacementSolver {
     }
 
     public static boolean canAddFaces(BlockState current, BlockState desired) {
-        if (!(desired.getBlock() instanceof MultifaceBlock) || !current.isOf(desired.getBlock())) return false;
+        if (!NativeAttachment.hasFaces(desired) || !current.isOf(desired.getBlock())) return false;
         boolean missing = false;
         for (Direction direction : Direction.values()) {
             BooleanProperty face = MultifaceBlock.getProperty(direction);
@@ -135,7 +135,7 @@ public final class NativePlacementSolver {
 
     /** Allow one new planned face, chosen from the hits that are reachable now. */
     public static boolean matchesNextPlacement(BlockView current, BlockPos target, BlockState desired, BlockState predicted) {
-        if (!(desired.getBlock() instanceof MultifaceBlock)) return statesMatch(desired, predicted);
+        if (!NativeAttachment.hasFaces(desired)) return statesMatch(desired, predicted);
         if (predicted == null || !predicted.isOf(desired.getBlock())) return false;
         BlockState before = current.getBlockState(target);
         boolean sameBlock = before.isOf(desired.getBlock());
@@ -262,7 +262,7 @@ public final class NativePlacementSolver {
         for (HitCandidate candidate : hits) {
             BlockState predicted = simulate(target, stack, candidate.hit(), player.getYaw(), player.getPitch());
             if (!matchesNextPlacement(MinecraftClient.getInstance().world, target, desired, predicted)) continue;
-            BlockState stableTarget = desired.getBlock() instanceof MultifaceBlock ? predicted : desired;
+            BlockState stableTarget = NativeAttachment.hasFaces(desired) ? predicted : desired;
             boolean stable = true;
             for (float[] rotation : OMNI_ROTATIONS) {
                 if (!statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation[0], rotation[1]))) {
@@ -288,7 +288,7 @@ public final class NativePlacementSolver {
             for (Rotation rotation : rotations) {
                 BlockState result = simulate(target, stack, candidate.hit(), rotation.yaw(), rotation.pitch());
                 if (!matchesNextPlacement(MinecraftClient.getInstance().world, target, desired, result)) continue;
-                BlockState stableTarget = desired.getBlock() instanceof MultifaceBlock ? result : desired;
+                BlockState stableTarget = NativeAttachment.hasFaces(desired) ? result : desired;
                 // Avoid nearest-direction boundaries while the player is moving.
                 if (!statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation.yaw() - 1.0F, rotation.pitch()))
                         || !statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation.yaw() + 1.0F, rotation.pitch()))) continue;
@@ -309,7 +309,7 @@ public final class NativePlacementSolver {
                 && validHit(target, mc.player.getEyePos(), hit, effectiveReach(reach))) {
             BlockState predicted = simulate(target, stack, hit, yaw, pitch);
             if (matchesNextPlacement(mc.world, target, desired, predicted)
-                    && (!(desired.getBlock() instanceof MultifaceBlock) || statesMatch(desired, predicted))) {
+                    && (!NativeAttachment.hasFaces(desired) || statesMatch(desired, predicted))) {
                 return new Solution(hit, predicted, yaw, pitch, solution.yawStep(), solution.airPlace(), solution.anyRotation());
             }
         }
@@ -318,7 +318,7 @@ public final class NativePlacementSolver {
         // Reusing the old point alone needlessly dropped a whole moving batch.
         Solution refreshed = solveRotations(target, desired, stack,
                 candidates(target, desired, reach, solution.airPlace(), true), List.of(new Rotation(yaw, pitch, solution.yawStep())));
-        if (refreshed != null && desired.getBlock() instanceof MultifaceBlock && !statesMatch(desired, refreshed.predicted())) return null;
+        if (refreshed != null && NativeAttachment.hasFaces(desired) && !statesMatch(desired, refreshed.predicted())) return null;
         return refreshed == null ? null : new Solution(refreshed.hit(), refreshed.predicted(), yaw, pitch,
                 solution.yawStep(), refreshed.airPlace(), solution.anyRotation());
     }
@@ -417,6 +417,11 @@ public final class NativePlacementSolver {
                 }
             }
         }
+        if (allowSupports && allowAir && NativeAttachment.isSensitive(desired)) {
+            // Clicking the real support biases vanilla's search toward that face even
+            // while head yaw and the neighboring supports differ across the wire.
+            result.sort(java.util.Comparator.comparing(HitCandidate::airPlace));
+        }
         return result;
     }
 
@@ -494,9 +499,20 @@ public final class NativePlacementSolver {
     }
 
     private static BlockState simulate(BlockPos target, ItemStack stack, BlockHitResult hit, float yaw, float pitch) {
+        return simulate(target, stack, hit, yaw, pitch, null);
+    }
+
+    public static boolean independentOfHeadYaw(BlockPos target, ItemStack stack, Solution solution) {
+        if (!NativeAttachment.isSensitive(solution.predicted())) return true;
+        return NativePlacementContext.forEveryHeadOrder(solution.pitch(), order ->
+                statesMatch(solution.predicted(), simulate(target, stack, solution.hit(), solution.yaw(), solution.pitch(), order)));
+    }
+
+    private static BlockState simulate(BlockPos target, ItemStack stack, BlockHitResult hit, float yaw, float pitch,
+                                       Direction[] headOrder) {
         BlockItem item = (BlockItem) stack.getItem();
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
-        NativePlacementContext context = new NativePlacementContext(player, Hand.MAIN_HAND, stack, hit, yaw, pitch);
+        NativePlacementContext context = new NativePlacementContext(player, Hand.MAIN_HAND, stack, hit, yaw, pitch, headOrder);
         if (!context.canPlace() || !item.getBlock().isEnabled(context.getWorld().getEnabledFeatures())) return null;
         ItemPlacementContext placement = item.getPlacementContext(context);
         if (placement == null || !placement.getBlockPos().equals(target)) return null;
@@ -556,6 +572,8 @@ public final class NativePlacementSolver {
     public static boolean statesMatch(BlockState desired, BlockState actual) {
         if (desired == null || actual == null) return false;
         if (TorchPlacement.isTorch(desired)) return TorchPlacement.matches(desired, actual);
+        // The carpet item can only place a base. Vanilla grows the upper pieces from that base.
+        if (desired.getBlock() instanceof PaleMossCarpetBlock) return desired.equals(actual);
         // Planting bamboo starts as a shoot; subsequent growth/upper placement
         // changes it into bamboo. Never generalize this to arbitrary block types.
         if (desired.isOf(Blocks.BAMBOO) && actual.isOf(Blocks.BAMBOO_SAPLING)) return true;
@@ -573,8 +591,9 @@ public final class NativePlacementSolver {
                     || desired.getBlock() instanceof TrapdoorBlock || desired.getBlock() instanceof FenceGateBlock)) continue;
             if (name.equals("mode") && desired.getBlock() instanceof ComparatorBlock) continue;
             if (name.equals("shape") && desired.getBlock() instanceof StairsBlock) continue;
-            if (PrinterConfig.PRINTER_IGNORE_ROTATION.getBooleanValue() && ROTATION_PROPERTIES.contains(name)) continue;
-            if (CONNECTION_PROPERTIES.contains(name) && !(desired.getBlock() instanceof MultifaceBlock)) continue;
+            if (PrinterConfig.PRINTER_IGNORE_ROTATION.getBooleanValue() && ROTATION_PROPERTIES.contains(name)
+                    && !(name.equals("facing") && NativeAttachment.facingDeterminesMount(desired))) continue;
+            if (CONNECTION_PROPERTIES.contains(name) && !NativeAttachment.hasFaces(desired)) continue;
             if (!actual.contains(property) || !desired.get(property).equals(actual.get(property))) return false;
         }
         return true;

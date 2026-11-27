@@ -3,6 +3,7 @@ package me.aleksilassila.litematica.printer.v1_21_11.mixin;
 import me.aleksilassila.litematica.printer.v1_21_11.LitematicaMixinMod;
 import me.aleksilassila.litematica.printer.v1_21_11.Printer;
 import me.aleksilassila.litematica.printer.v1_21_11.InventoryFenceOrder;
+import me.aleksilassila.litematica.printer.v1_21_11.NativeHeadRotation;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -12,9 +13,12 @@ import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.InventoryS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
+import net.minecraft.network.packet.s2c.play.PlayerActionResponseS2CPacket;
+import net.minecraft.network.packet.s2c.play.PlayerRotationS2CPacket;
 import net.minecraft.network.packet.s2c.play.ScreenHandlerSlotUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.StatisticsS2CPacket;
 import net.minecraft.network.packet.s2c.play.SetPlayerInventoryS2CPacket;
+import net.minecraft.network.packet.s2c.play.WorldTimeUpdateS2CPacket;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -66,6 +70,16 @@ public class NativePlacementNetworkMixin implements InventoryFenceOrder.Access {
         Printer.inventoryManager.onInventoryReadbackBarrier((ClientPlayNetworkHandler) (Object) this);
     }
 
+    @Inject(method = "onWorldTimeUpdate", at = @At("TAIL"))
+    private void printer$headRotationTime(WorldTimeUpdateS2CPacket packet, CallbackInfo ci) {
+        NativeHeadRotation.onWorldTime((ClientPlayNetworkHandler) (Object) this, packet.time());
+    }
+
+    @Inject(method = "onPlayerRotation", at = @At("TAIL"))
+    private void printer$headRotationCorrection(PlayerRotationS2CPacket packet, CallbackInfo ci) {
+        NativeHeadRotation.clear();
+    }
+
     @Inject(method = "onSetPlayerInventory", at = @At("TAIL"))
     private void printer$directInventorySlot(SetPlayerInventoryS2CPacket packet, CallbackInfo ci) {
         ClientPlayerEntity player = printer$inventoryPlayer();
@@ -79,6 +93,14 @@ public class NativePlacementNetworkMixin implements InventoryFenceOrder.Access {
         Printer.confirmNativePlacement(packet.getPos(), packet.getState());
     }
 
+    @Inject(method = "onPlayerActionResponse", at = @At("TAIL"))
+    private void printer$acknowledgeBlockActions(PlayerActionResponseS2CPacket packet, CallbackInfo ci) {
+        if (MinecraftClient.getInstance().getNetworkHandler() == (Object) this) {
+            NativeHeadRotation.onActionResponse((ClientPlayNetworkHandler) (Object) this);
+            Printer.acknowledgeBlockActions(packet.sequence());
+        }
+    }
+
     @Inject(method = "onChunkDeltaUpdate", at = @At("TAIL"))
     private void printer$chunkDelta(ChunkDeltaUpdateS2CPacket packet, CallbackInfo ci) {
         packet.visitUpdates(Printer::confirmNativePlacement);
@@ -86,6 +108,7 @@ public class NativePlacementNetworkMixin implements InventoryFenceOrder.Access {
 
     @Inject(method = "onPlayerPositionLook", at = @At("TAIL"))
     private void printer$correction(PlayerPositionLookS2CPacket packet, CallbackInfo ci) {
+        NativeHeadRotation.clear();
         if (LitematicaMixinMod.printer != null) LitematicaMixinMod.printer.onServerCorrection();
     }
 }

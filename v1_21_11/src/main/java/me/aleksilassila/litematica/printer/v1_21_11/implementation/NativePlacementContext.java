@@ -7,6 +7,9 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Predicate;
 
 /**
  * Placement context whose look direction is supplied by the printer solver.
@@ -14,16 +17,23 @@ import net.minecraft.util.math.MathHelper;
  * local camera or relying on the user's crosshair.
  */
 public final class NativePlacementContext extends ItemPlacementContext {
+    private static final List<Direction[]> HEAD_UP = headOrders(Direction.UP);
+    private static final List<Direction[]> HEAD_DOWN = headOrders(Direction.DOWN);
     private final float yaw;
     private final float pitch;
     private final Direction[] lookDirections;
 
     public NativePlacementContext(PlayerEntity player, Hand hand, ItemStack stack, BlockHitResult hit,
                                   float yaw, float pitch) {
+        this(player, hand, stack, hit, yaw, pitch, null);
+    }
+
+    public NativePlacementContext(PlayerEntity player, Hand hand, ItemStack stack, BlockHitResult hit,
+                                  float yaw, float pitch, Direction[] headOrder) {
         super(player, hand, stack, hit);
         this.yaw = yaw;
         this.pitch = pitch;
-        this.lookDirections = orderedDirections(yaw, pitch);
+        this.lookDirections = headOrder == null ? orderedDirections(yaw, pitch) : headOrder;
         // ItemPlacementContext's constructor may call BlockState.canReplace
         // before the simulated look fields are initialized (e.g. layering a
         // slab). Re-evaluate replacement after initializing this context.
@@ -108,6 +118,34 @@ public final class NativePlacementContext extends ItemPlacementContext {
 
     private static Direction[] directions(Direction first, Direction second, Direction third) {
         return new Direction[]{first, second, third, third.getOpposite(), second.getOpposite(), first.getOpposite()};
+    }
+
+    // A server player orders placement directions using head yaw, while the scalar yaw
+    // and horizontal-facing accessors already use the most recent movement packet.
+    // Cover every signed horizontal-axis order, including ties. A steep pitch always
+    // puts the vertical axis first; the small margin also covers vanilla trig rounding.
+    public static boolean forEveryHeadOrder(float pitch, Predicate<Direction[]> matches) {
+        float inclination = Math.abs(pitch);
+        boolean up = MathHelper.sin(pitch * 0.017453292F) < 0.0F;
+        for (Direction[] order : up ? HEAD_UP : HEAD_DOWN) {
+            if (inclination > 45.1F && order[0].getAxis().isHorizontal()) continue;
+            if (inclination < 35.2F && order[0].getAxis().isVertical()) continue;
+            if (inclination > 35.3F && order[2].getAxis().isVertical()) continue;
+            if (!matches.test(order)) return false;
+        }
+        return true;
+    }
+
+    private static List<Direction[]> headOrders(Direction vertical) {
+        List<Direction[]> result = new ArrayList<>();
+        for (Direction major : Direction.Type.HORIZONTAL) {
+            for (Direction minor : new Direction[]{major.rotateYClockwise(), major.rotateYCounterclockwise()}) {
+                result.add(directions(major, minor, vertical));
+                result.add(directions(major, vertical, minor));
+                result.add(directions(vertical, major, minor));
+            }
+        }
+        return result;
     }
 
     public float getSimulatedYaw() {

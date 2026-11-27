@@ -38,6 +38,9 @@ public final class NativeRegressionLauncher {
             requireInjected(loader, "net.minecraft.client.network.ClientPlayerEntity", "printer$flushNativePlacement");
             requireInjected(loader, "net.minecraft.entity.Entity", "printer$movementSpeed");
             requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$blockUpdate");
+            requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$acknowledgeBlockActions");
+            requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$headRotationTime");
+            requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$headRotationCorrection");
             requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$correction");
             requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$inventoryReadbackFence");
             requireInjected(loader, "net.minecraft.network.ClientConnection", "printer$recordStatisticsWrite");
