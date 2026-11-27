@@ -114,7 +114,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
         set(Entity.class, player, "dimensions", EntityDimensions.fixed(0.6F, 1.8F));
         set(Entity.class, player, "blockPos", new BlockPos(0, 64, 0));
         GameOptions options = (GameOptions) unsafe.allocateInstance(GameOptions.class);
-        for (String name : List.of("sneakKey", "forwardKey", "backKey", "leftKey", "rightKey", "jumpKey", "sprintKey"))
+        for (String name : List.of("sneakKey", "forwardKey", "backKey", "leftKey", "rightKey"))
             set(GameOptions.class, options, name, unsafe.allocateInstance(KeyBinding.class));
         set(MinecraftClient.class, client, "options", options);
         set(MinecraftClient.class, client, "cameraEntity", player);
@@ -258,13 +258,6 @@ final class StateInteractionTestFixture implements AutoCloseable {
         @Override public ItemStack getOffHandStack() { return offhand; }
         @Override public boolean isSneaking() { return sneaking; }
         @Override public boolean isAlive() { return true; }
-        @Override public boolean isSleeping() { return false; }
-        @Override public boolean hasVehicle() { return false; }
-        @Override public boolean isGliding() { return false; }
-        @Override public boolean isSwimming() { return false; }
-        @Override public boolean isTouchingWater() { return false; }
-        @Override public boolean isInLava() { return false; }
-        @Override public boolean isClimbing() { return false; }
         @Override public boolean isUsingItem() { return false; }
         @Override public boolean isSprinting() { return false; }
         @Override public boolean isDescending() { return sneaking; }

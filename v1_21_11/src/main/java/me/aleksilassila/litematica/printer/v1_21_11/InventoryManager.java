@@ -226,13 +226,9 @@ public class InventoryManager {
     }
 
     public void onInventoryReadbackBarrier(ClientPlayNetworkHandler network) {
-        onInventoryReadbackBarrier(network, -1);
-    }
-
-    public void onInventoryReadbackBarrier(ClientPlayNetworkHandler network, int playTime) {
         // Always consume the reply, even when no printer session is running. Vanilla replies to
         // REQUEST_STATS in order on the same server thread that applies and publishes clicks.
-        ClientStatusC2SPacket fence = InventoryFenceOrder.get(network).received(playTime);
+        ClientStatusC2SPacket fence = InventoryFenceOrder.get(network).received();
         if (fence == null || pendingSwap == null || pendingSwap.fence != fence || mc.getNetworkHandler() != network) return;
         if (mc.player != null) ensureInventoryOwner(mc.player);
         PendingSwap swap = pendingSwap;

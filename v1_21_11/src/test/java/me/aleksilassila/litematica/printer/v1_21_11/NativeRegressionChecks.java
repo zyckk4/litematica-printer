@@ -23,10 +23,6 @@ public final class NativeRegressionChecks {
     public static void main(String[] args) throws Exception {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
-        if (java.util.Arrays.asList(args).contains("--attachments")) {
-            checkAttachments();
-            return;
-        }
         if (java.util.Arrays.asList(args).contains("--sign-writes")) {
             SignWriteChecks.run();
             return;
@@ -56,7 +52,6 @@ public final class NativeRegressionChecks {
         checkLegacyRotationHandoff();
         int placementChecks = NativePlacementContextChecks.run();
         int solverChecks = NativePlacementSolverChecks.run();
-        checkAttachments();
         int interactionChecks = InteractionRegressionChecks.run();
         InventorySchedulingChecks.run();
         int conversionChecks = SchematicConversionRegressionChecks.run();
@@ -68,14 +63,6 @@ public final class NativeRegressionChecks {
                 + solverChecks + " full-solver assertions; " + interactionChecks + " state/inventory/interaction assertions; "
                 + conversionChecks + " schematic-conversion assertions; " + movingChecks
                 + " moving-state assertions; " + sneakChecks + " sneak-recovery assertions.");
-    }
-
-    private static void checkAttachments() throws Exception {
-        AttachmentBatchChecks.run();
-        NativeAttachmentStateChecks.run();
-        NativeHeadRotationChecks.run();
-        SharedHangingSignChecks.run();
-        System.out.println("Native attachment regressions passed.");
     }
 
     private static void checkLatticeAgainstVanilla() throws Exception {

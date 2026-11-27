@@ -208,7 +208,6 @@ public class MovementHandler {
         sentYaw = accessor.getLastYaw();
         sentPitch = accessor.getLastPitch();
         movementSent = true;
-        NativeHeadRotation.onMovementSent(player, sentYaw);
     }
 
     public static boolean sentRotationMatches(float yaw, float pitch) {

@@ -11,10 +11,6 @@ public final class PlacementRateLimiter {
     private int sentThisTick;
 
     public boolean available(long now, int tick, int burst, int windowMs, int windowLimit) {
-        return available(now, tick, burst, windowMs, windowLimit, 1);
-    }
-
-    boolean available(long now, int tick, int burst, int windowMs, int windowLimit, int count) {
         // Keep enough history for a later window increase, including after a
         // temporary decrease. Changing settings must not grant a fresh budget.
         while (!sent.isEmpty() && now - sent.peekFirst() >= HISTORY_NANOS) sent.removeFirst();
@@ -22,14 +18,14 @@ public final class PlacementRateLimiter {
             lastTick = tick;
             sentThisTick = 0;
         }
-        if (count <= 0 || burst < count || windowLimit < count || windowMs <= 0 || windowMs > MAX_WINDOW_MILLIS
-                || sentThisTick > burst - count) return false;
+        if (burst <= 0 || windowLimit <= 0 || windowMs <= 0 || windowMs > MAX_WINDOW_MILLIS
+                || sentThisTick >= burst) return false;
         long windowNanos = windowMs * 1_000_000L;
         int active = 0;
         var newestFirst = sent.descendingIterator();
         while (newestFirst.hasNext()) {
             if (now - newestFirst.next() >= windowNanos) break;
-            if (++active > windowLimit - count) return false;
+            if (++active >= windowLimit) return false;
         }
         return true;
     }
