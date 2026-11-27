@@ -1,11 +1,11 @@
 # Litematica Printer — Minecraft 1.21.4
 
-A Fabric printer extension for Litematica, optimized specifically for the current
-2b2t server version and environment. This branch targets the **Minecraft 1.21.4 client**
+A Fabric printer extension for Litematica, designed for 2b2t’s Minecraft 1.21.4
+Folia server. This branch targets the **Minecraft 1.21.4 client**
 connecting directly to 2b2t, with native placement and movement handling. No
 client-side Via mod is required.
 
-Version: **3.4.7**. The `1.21.4` branch ports the native printer logic from the
+Version: **3.4.10**. The `1.21.4` branch ports the native printer logic from the
 `1.21.11` branch, preserving its placement, movement and interaction behavior for
 blocks supported by Minecraft 1.21.4. The earlier 1.21.4 implementation remains
 available in Git history; the `1.21.11` branch targets the newer client separately.
@@ -37,7 +37,7 @@ Requirements:
 - [MaLiLib 0.23.5](https://modrinth.com/mod/malilib/version/ifi4uRpL).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.7-mc1.21.4.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.10-mc1.21.4.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -66,15 +66,20 @@ The interaction defaults below apply to new configurations or reset options:
 | `printerInteractionWindowMs` | `310` | Rolling window in milliseconds (1–10000); 300 is also configurable |
 | `printerInteractionWindowLimit` | `9` | Maximum interaction attempts in the window (1–64) |
 | `printerTickDelay` | `0` | Attempt each tick within the shared interaction budget |
+| `printerMinSignDelayMs` | `500` | Minimum milliseconds each sign face waits after its edit request. Set to 0 for immediate submission. |
 | `printerStopOnMovement` | `false` | Allow printing while moving |
 | `printerRaycast` | `false` | Allow in-range targets behind obstructions |
 | `printerStrictBlockFaceCheck` | `false` | Allow clicks on the far side of a support block |
 | `printerIgnoreRotation` | `false` | Preserve schematic block orientations |
 | `printerAirPlace` | `true` | Enable airplace for specialized placement handlers |
 | `printerAirPlaceRange` | `4.5` | Range for specialized airplace handlers |
-| `printerInventoryDelay` | `5` | Wait after replenishment; try `10` at high latency |
+| `printerInventoryDelay` | `10` | Inventory recovery interval in client ticks, with a minimum of 10. Survival printing can stage up to three materials that use distinct slots. The printer checks every exchanged slot after the server processes the group. Other ready slots remain usable. |
 | `printerHotbarSlots` | `3,4,5,6,7,8,9` | Use slots 3–9 as refill destinations |
 | `printerDisableInGuis` | `true` | Pause while a screen is open |
+
+Survival refills use the vanilla statistics reply to verify that the server
+has processed the slot exchanges. If a server withholds this reply, the printer
+keeps the affected slots reserved and can continue using other ready slots.
 
 Keep `printerRotatePlayer`, `printerFreeLook` and `printerNativeGrimAirplace`
 disabled for this setup. Either native mode leaves the local camera in control.
@@ -140,21 +145,33 @@ longer prevent placing supported block shells, but this does not restore their
 contents: the remaining manual steps are listed below.
 
 Incorrect blocks and orientations are not automatically excavated and replaced.
-Redstone-controlled states follow the surrounding circuit. Sign text is filled
-when an editing screen opens; existing text, back-face text, dye, glow and wax
+Native placement prefers the schematic's support face for ordinary signs. This
+keeps a nearby stone, door or another sign placed in the same batch from taking
+over as the support. A placement that needs a new support can proceed once that
+support is visible. Wall attachments keep their mounting side even with
+`printerIgnoreRotation` enabled. On Folia 1.21.4 an accepted turn updates head
+rotation immediately, so hanging signs can use that turn in the same tick.
+Redstone-controlled states follow the surrounding circuit. When the server opens
+a sign face for editing, the printer captures its four schematic lines and
+suppresses the editor. Each sign waits independently for `printerMinSignDelayMs`
+(0–10000 ms). Up to 20 ready faces are submitted per client tick when using a
+delay. Printing can continue during the wait. Releasing the print key still
+allows pending writes to finish while their signs remain within editing reach.
+New signs receive front text. Existing text, back-face text, dye, glow and wax
 are not automatically repaired.
 
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.7
+## Remaining issues in 3.4.10
 
 | Area | Trigger and observed code behavior |
 | --- | --- |
 | Native solver | With `printerNativeMoving` enabled and both `printerNativeOmni` and `printerGrimRotate` disabled, ordinary blocks can be skipped even with solid support. |
 | Content and transformations | The printer can start with the empty/basic block, but does not insert books, bottles or records; fill cauldrons; add candles to cakes; charge respawn anchors; fill composters; or recreate cake bites and honey levels. Restore these separately. Bamboo growth and berries also follow normal game rules. |
 | Existing light state | An extinguished campfire is not automatically relit, and a lit candle is not automatically extinguished. The opposite operations are supported while stationary. |
-| Vine attachments | Ordinary vines can accept a different supported face from the schematic and do not repair existing faces. Multiface blocks use the separate staged-face path. |
+| Vine attachments | Native printing can add missing vine faces. A vine already attached to an extra side needs manual removal. |
+| Pale moss carpet | The item places the base. The game grows upper fronds, so the printer skips an upper frond that cannot be placed directly. |
 | Strict raycast and slabs | With both `printerRaycast` and `printerRaycastStrictBlockHit` enabled, completing a bottom slab from directly above can fail because hit samples use full-block faces. |
 | Keys and camera | Default `printerPickBlock` can consume middle click on a miss. In legacy mode FreeLook can stay active after printing stops. |
 | Airplace and state matching | The legacy airplace switch, range, airplace-only mode and inactivity delay do not govern native omni placement. Legacy airplace can reuse a cached context with `printerNoPlacementCache` enabled. The explicit `printerAllowNoneExactStates` check is limited to the legacy glow lichen guide. |
@@ -195,6 +212,21 @@ gameplay and server acceptance require a client test.
 Run just the state-interaction and temporary-sneak regressions with
 `./gradlew :v1_21_4:nativeRegression --args=--state-interactions`
 (use `.\gradlew.bat` on Windows).
+
+The focused native attachment and sign-text checks accept `--args=--attachments`
+and `--args=--sign-writes`. To exercise mixed-material refills at 200 ms
+simulated latency, run `./gradlew :v1_21_4:nativeRegression --args=--inventory-latency`.
+
+For the 3.4.10 port, a Minecraft 1.21.4 client with Fabric Loader 0.18.2,
+Litematica 0.21.7 and MaLiLib 0.23.5 connected directly to local Folia
+1.21.4 build 6 (`b785bcc`). Printer 3.4.7 and 3.4.10 printed the same 15
+survival layouts. The server recorded six exact layouts and nine incorrect
+placements with 3.4.7. With 3.4.10 it recorded 14 exact layouts. The upper
+pale moss frond stayed air with zero use attempts, as expected for a frond
+that grows from its base. With rotation ignored, the east-facing wall sign
+changed from `oak_wall_sign[facing=south,waterlogged=false]` in 3.4.7 to
+`oak_wall_sign[facing=east,waterlogged=false]` in 3.4.10. These runs cover
+the local Folia setup. Behavior on 2b2t remains unverified.
 
 After committing the reviewed files and building from a clean working tree,
 run `python scripts/prepare_release.py` with Python 3.11 or newer to create local

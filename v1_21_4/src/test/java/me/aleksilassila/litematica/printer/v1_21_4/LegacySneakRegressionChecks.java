@@ -16,9 +16,14 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.option.GameOptions;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.entity.player.PlayerAbilities;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.entity.player.PlayerInventory;
+import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
+import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.PlayerInput;
@@ -41,8 +46,13 @@ public final class LegacySneakRegressionChecks {
         assertions = 0;
         MinecraftClient previous = MinecraftClient.getInstance();
         boolean airOnly = PrinterConfig.PRINTER_AIRPLACE_ONLY.getBooleanValue();
+        Field inventoryClient = InventoryManager.class.getDeclaredField("mc");
+        inventoryClient.setAccessible(true);
+        MinecraftClient previousInventoryClient = (MinecraftClient) inventoryClient.get(Printer.inventoryManager);
         try {
             Fixture fixture = new Fixture();
+            inventoryClient.set(Printer.inventoryManager, fixture.client);
+            Printer.inventoryManager.reset();
             for (ActionResult result : new ActionResult[]{ActionResult.SUCCESS, ActionResult.FAIL}) {
                 fixture.reset(false, false);
                 fixture.interaction.result = result;
@@ -163,6 +173,8 @@ public final class LegacySneakRegressionChecks {
                     "Cancelling an unstarted placement retained network or queued state");
             fixture.checkRestored();
         } finally {
+            inventoryClient.set(Printer.inventoryManager, previousInventoryClient);
+            Printer.inventoryManager.reset();
             set(MinecraftClient.class, null, "instance", previous);
             PrinterConfig.PRINTER_AIRPLACE_ONLY.setBooleanValue(airOnly);
             rateLimiter().reset();
@@ -191,6 +203,12 @@ public final class LegacySneakRegressionChecks {
             network.events = new ArrayList<>();
             interaction.network = network;
             player.input = new Input();
+            set(PlayerEntity.class, player, "inventory", new PlayerInventory(player));
+            set(PlayerEntity.class, player, "abilities", new PlayerAbilities());
+            PlayerScreenHandler screen = (PlayerScreenHandler) unsafe.allocateInstance(PlayerScreenHandler.class);
+            screen.setCursorStack(ItemStack.EMPTY);
+            set(PlayerEntity.class, player, "playerScreenHandler", screen);
+            player.currentScreenHandler = screen;
             set(ClientPlayerEntity.class, player, "networkHandler", network);
             client.player = player;
             client.interactionManager = interaction;

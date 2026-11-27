@@ -40,6 +40,11 @@ public class MixinClientPlayerEntity {
         return MovementHandler.serverPitch(original);
     }
 
+    @Inject(method = "sendMovementPackets", at = @At("HEAD"))
+    private void printer$prepareMovementLook(CallbackInfo ci) {
+        MovementHandler.prepareMovementLook((ClientPlayerEntity) (Object) this);
+    }
+
     @Inject(method = "sendMovementPackets", at = @At("RETURN"))
     private void printer$flushNativePlacement(CallbackInfo ci) {
         ClientPlayerEntity player = (ClientPlayerEntity) (Object) this;

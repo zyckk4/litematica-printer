@@ -19,19 +19,30 @@ import me.aleksilassila.litematica.printer.v1_21_4.actions.NativePlacementAction
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.block.AbstractRailBlock;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.block.FluidBlock;
 import net.minecraft.block.ObserverBlock;
+import net.minecraft.block.PaleMossCarpetBlock;
+import net.minecraft.block.PitcherCropBlock;
+import net.minecraft.block.TallPlantBlock;
+import net.minecraft.block.enums.BedPart;
+import net.minecraft.block.enums.DoubleBlockHalf;
+import net.minecraft.block.enums.WallShape;
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.item.ItemStack;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.MultifaceBlock;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.item.BlockItem;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec2f;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.BlockView;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
@@ -62,6 +73,10 @@ public class Printer {
     public static int inactivityCounter = 0;
     static final LinkedList<BlockTimeout> blockPosTimeout = new LinkedList<>();
     private static final Map<BlockPos, PendingPlacement> pendingPlacements = new HashMap<>();
+    // One BlockItem click may publish several cells. Each cell's world update arrives independently.
+    private static final Map<BlockPos, BlockChange> pendingBlockChanges = new HashMap<>();
+    private static int acknowledgedSequence = -1;
+    private static final Map<Integer, SlotStock> pendingStock = new HashMap<>();
     private static Object predictionWorld;
     private static final PlacementRateLimiter placementRate = new PlacementRateLimiter();
     int delayCounter = 0;
@@ -71,9 +86,12 @@ public class Printer {
     public Printer(@NotNull MinecraftClient client, @NotNull ClientPlayerEntity player) {
         this.player = player;
         pendingPlacements.clear();
+        pendingBlockChanges.clear();
+        acknowledgedSequence = -1;
+        resetStock();
         blockPosTimeout.clear();
         placementRate.reset();
-        inventoryManager.reset();
+        inventoryManager.onPrinterContextChanged();
         MovementHandler.clearRotation();
         this.actionHandler = new ActionHandler(client, player);
     }
@@ -151,11 +169,13 @@ public class Printer {
         if (PrinterConfig.PRINTER_DISABLE_IN_GUIS.getBooleanValue()) {
             if (mc.currentScreen != null) return false;
         }
-        if (!actionHandler.acceptsActions() || !canAcquirePlacementPacket() || player.isUsingItem()) return false;
+        if (!actionHandler.acceptsActions() || player.isUsingItem()) return false;
+        boolean placementBudget = canAcquirePlacementPacket();
+        if (!placementBudget && !inventoryManager.canPrefetch()) return false;
 
         List<BlockPos> positions = getReachablePositions();
 
-        positions = positions.stream().filter(pos -> !pendingPlacements.containsKey(pos)
+        positions = positions.stream().filter(pos -> !hasPendingPlacement(pos)
                 && blockPosTimeout.stream().noneMatch(entry -> entry.pos.equals(pos))).toList();
 
         boolean moving = player.input.getMovementInput().lengthSquared() > 0.0001F
@@ -165,79 +185,17 @@ public class Printer {
         boolean nativeEnabled = PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()
                 || PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
         if (nativeEnabled && (!moving || PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue())) {
-            NativePlacementSolver.Solution batchSolution = null;
-            ItemStack batchStack = null;
-            Set<BlockPos> chestNeighborsInBatch = new java.util.HashSet<>();
-            Set<BlockPos> playerOccupied = Set.copyOf(getBlocksPlayerOccupied());
-            List<BlockPos> candidates = positions.stream().filter(pos -> isNativePlacementCandidate(
-                    new SchematicBlockState(player.getWorld(), worldSchematic, pos), playerOccupied)).toList();
-            int attempts = Math.min(candidates.size(), 24);
-            int start = candidates.isEmpty() ? 0 : Math.floorMod(scanCursor, candidates.size());
-            long solveDeadline = System.nanoTime() + 3_000_000L;
-            int examined = 0;
-            for (int i = 0; i < attempts; i++) {
-                if (i > 0 && System.nanoTime() >= solveDeadline) break;
-                examined++;
-                BlockPos position = candidates.get((start + i) % candidates.size());
-                BlockState finalState = LogStrippingGuide.placementTarget(player, worldSchematic.getBlockState(position));
-                // Adjacent chests change one another's type. The second half
-                // must be solved after the first server update, not against
-                // the same empty client world in this batch.
-                if (finalState.getBlock() instanceof ChestBlock && chestNeighborsInBatch.contains(position)) continue;
-                BlockState desired = NativePlacementSolver.placementTarget(mc.world, worldSchematic, position, finalState);
-                ItemStack required = MaterialCache.getInstance().getRequiredBuildItemForState(
-                        PlacementStages.initialTarget(finalState), worldSchematic, position);
-                if (required.isEmpty() || !inventoryManager.hasMaterial(required)) continue;
-                if (batchStack != null && !ItemStack.areItemsAndComponentsEqual(batchStack, required)) continue;
-                boolean allowAir = PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
-                NativePlacementSolver.Solution solution;
-                if (batchSolution != null) {
-                    // Ordinary and directional targets may share a batch if
-                    // they work at the same already-selected server angles.
-                    solution = PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()
-                            ? NativePlacementSolver.solveMovingAtRotation(position, desired, required,
-                                    getEffectivePrintingRange(), allowAir, player.isSprinting(),
-                                    batchSolution.yaw(), batchSolution.pitch())
-                            : NativePlacementSolver.solveAnyRotation(position, desired, required, getEffectivePrintingRange());
-                } else {
-                    // The solver checks rotation-independent placement itself;
-                    // do not repeat that full hit/angle scan for every target.
-                    if (PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) {
-                        solution = moving
-                                ? NativePlacementSolver.solveMoving(position, desired, required,
-                                        getEffectivePrintingRange(), allowAir, player.isSprinting())
-                                : NativePlacementSolver.solveStationary(position, desired, required,
-                                        getEffectivePrintingRange(), allowAir);
-                    } else {
-                        solution = allowAir ? NativePlacementSolver.solveAnyRotation(
-                                position, desired, required, getEffectivePrintingRange()) : null;
-                    }
-                }
-                if (solution == null) continue;
-                if (!solution.anyRotation() && !PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) continue;
-                if (batchSolution == null) {
-                    // A refill stages the stack for a later tick. No old hit or
-                    // rotation is retained while waiting for inventory changes.
-                    if (!inventoryManager.select(required)) return false;
-                    if (!solution.anyRotation() && !MovementHandler.requestRotation(solution.yaw(), solution.pitch())) continue;
-                    batchSolution = solution;
-                    batchStack = required;
-                    actionHandler.clearLookAction();
-                }
-                BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
-                nativeActions.add(new NativePlacementAction(position, actionTarget, required, solution));
-                if (finalState.getBlock() instanceof ChestBlock) {
-                    for (Direction side : Direction.Type.HORIZONTAL) chestNeighborsInBatch.add(position.offset(side));
-                }
-                if (nativeActions.size() >= PrinterConfig.NATIVE_BURST.getIntegerValue()) break;
-            }
-            scanCursor = start + examined;
-            if (!nativeActions.isEmpty()) return true;
+            if (planNativePlacements(worldSchematic, positions, moving, placementBudget)) return true;
         }
+        if (!placementBudget) return false;
         if (moving && nativeEnabled && !PrinterConfig.PRINTER_NATIVE_MOVING.getBooleanValue()) return false;
         List<Action> batchedActions = new ArrayList<>();
         AirplaceBatchKey batchKey = null;
         int batchedChains = 0;
+        List<Action> deferredGuide = List.of();
+        ItemStack deferredMaterial = null;
+        List<SchematicBlockState> deferredMoving = new ArrayList<>();
+        List<ItemStack> readyGuideMaterials = new ArrayList<>();
 
         long guideDeadline = System.nanoTime() + 3_000_000L;
         int guideStart = positions.isEmpty() ? 0 : Math.floorMod(guideCursor, positions.size());
@@ -248,8 +206,14 @@ public class Printer {
             BlockPos position = positions.get((guideStart + index) % positions.size());
             SchematicBlockState state = new SchematicBlockState(player.getWorld(), worldSchematic, position);
             if (state.targetState.equals(state.currentState) || state.targetState.isAir()) continue;
-            if (pendingPlacements.containsKey(position)) continue;
+            if (hasPendingPlacement(position)) continue;
             if (moving && nativeEnabled) {
+                ItemStack material = MovingPrinterAction.requiredMaterial(state, player);
+                if (material == null) continue;
+                if (!inventoryManager.hasReadyHotbarMaterial(material)) {
+                    deferredMoving.add(state);
+                    continue;
+                }
                 MovingPrinterAction action = MovingPrinterAction.prepare(state, player, getEffectivePrintingRange());
                 if (action == null) continue;
                 actionHandler.clearLookAction();
@@ -271,6 +235,14 @@ public class Printer {
             for (Guide guide : guides) {
                 if (guide.canExecute(player)) {
                     List<Action> actions = guide.execute(player);
+                    ItemStack material = guide.requiredMaterial(player);
+                    if (!actions.isEmpty() && material != null && !inventoryManager.hasReadyHotbarMaterial(material)) {
+                        if (deferredGuide.isEmpty()) {
+                            deferredGuide = actions;
+                            deferredMaterial = material;
+                        }
+                        continue findBlock;
+                    }
                     AirplaceBatchKey candidateKey = getAirplaceBatchKey(actions);
 
                     // Non-airplace interactions may require a different
@@ -278,6 +250,9 @@ public class Printer {
                     // original one-chain behaviour for those interactions.
                     if (candidateKey == null) {
                         if (batchedActions.isEmpty()) {
+                            if (!actions.isEmpty() && deferredMaterial != null && !player.getAbilities().creativeMode) {
+                                inventoryManager.prefetch(deferredMaterial, material == null ? List.of() : List.of(material));
+                            }
                             actionHandler.addActions(actions.toArray(Action[]::new));
                             return true;
                         }
@@ -291,6 +266,7 @@ public class Printer {
                     }
 
                     batchedActions.addAll(actions);
+                    if (material != null) readyGuideMaterials.add(material);
                     batchedChains++;
                     if (batchedChains >= PrinterConfig.NATIVE_BURST.getIntegerValue()) {
                         break findBlock;
@@ -305,12 +281,139 @@ public class Printer {
         }
 
         if (!batchedActions.isEmpty()) {
+            if (deferredMaterial != null && !player.getAbilities().creativeMode) {
+                inventoryManager.prefetch(deferredMaterial, readyGuideMaterials);
+            }
             actionHandler.addActions(batchedActions.toArray(Action[]::new));
             return true;
         }
 
+        if (!deferredGuide.isEmpty() && inventoryManager.canStartRefill()) {
+            actionHandler.addActions(deferredGuide.toArray(Action[]::new));
+            return true;
+        }
+        if (!deferredMoving.isEmpty() && inventoryManager.canStartRefill()) {
+            for (SchematicBlockState state : deferredMoving) {
+                guideCursor = positions.indexOf(state.blockPos) + 1;
+                MovingPrinterAction action = MovingPrinterAction.prepare(state, player, getEffectivePrintingRange());
+                if (action != null) {
+                    actionHandler.clearLookAction();
+                    nativeActions.add(action);
+                    return true;
+                }
+                if (!inventoryManager.canStartRefill() || System.nanoTime() >= guideDeadline) break;
+            }
+        }
+
         return false;
     }
+
+    private boolean planNativePlacements(WorldSchematic schematic, List<BlockPos> positions, boolean moving, boolean placementBudget) {
+        Set<BlockPos> occupied = Set.copyOf(getBlocksPlayerOccupied());
+        List<BlockPos> candidates = positions.stream().filter(pos -> isNativePlacementCandidate(
+                new SchematicBlockState(player.getWorld(), schematic, pos), occupied)).toList();
+        if (candidates.isEmpty()) return false;
+
+        List<NativeTarget> ready = new ArrayList<>();
+        List<NativeTarget> refill = new ArrayList<>();
+        int start = Math.floorMod(scanCursor, candidates.size());
+        int attempts = Math.min(candidates.size(), 24);
+        for (int offset = 0; offset < attempts; offset++) {
+            BlockPos pos = candidates.get((start + offset) % candidates.size());
+            BlockState target = LogStrippingGuide.placementTarget(player, schematic.getBlockState(pos));
+            ItemStack stack = MaterialCache.getInstance().getRequiredBuildItemForState(
+                    PlacementStages.initialTarget(target), schematic, pos);
+            if (stack.isEmpty()) continue;
+            if (inventoryManager.hasReadyNativeMaterial(stack)) {
+                ready.add(new NativeTarget(pos, target, stack, offset));
+            } else if (inventoryManager.hasMaterial(stack)) {
+                refill.add(new NativeTarget(pos, target, stack, offset));
+            }
+        }
+
+        long deadline = System.nanoTime() + 3_000_000L;
+        NativePlacementSolver.Solution batchSolution = null;
+        List<ItemStack> keep = new ArrayList<>();
+        Set<BlockPos> chestNeighbors = new java.util.HashSet<>();
+        int lastExamined = -1;
+        for (NativeTarget target : ready) {
+            if (!placementBudget) break;
+            if (lastExamined >= 0 && System.nanoTime() >= deadline) break;
+            lastExamined = target.offset();
+            // Adjacent chests must be solved after the first server update.
+            if (target.state().getBlock() instanceof ChestBlock && chestNeighbors.contains(target.pos())) continue;
+            BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
+            NativePlacementSolver.Solution solution = solveNative(target, desired, moving, batchSolution);
+            if (solution == null || dependsOnPendingBlock(target.pos(), desired, target.stack(), solution.hit())) continue;
+            if (batchSolution == null) {
+                if (!inventoryManager.selectReadyNativeMaterial(target.stack()) || !prepareNativeRotation(solution)) continue;
+                batchSolution = solution;
+                actionHandler.clearLookAction();
+            }
+            addNativePlacement(target, desired, solution);
+            keep.add(target.stack());
+            if (target.state().getBlock() instanceof ChestBlock) {
+                for (Direction side : Direction.Type.HORIZONTAL) chestNeighbors.add(target.pos().offset(side));
+            }
+            if (nativeActions.size() >= PrinterConfig.NATIVE_BURST.getIntegerValue()) break;
+        }
+
+        scanCursor = start + (lastExamined >= 0 ? lastExamined + 1 : attempts);
+        boolean hasBatch = !nativeActions.isEmpty();
+        if (hasBatch && !inventoryManager.canPrefetch()) return true;
+        if (!hasBatch && !inventoryManager.canStartRefill()) return false;
+        if (!placementBudget) ready.forEach(target -> keep.add(target.stack()));
+        List<ItemStack> wanted = new ArrayList<>(3);
+        boolean triedRefill = false;
+        for (NativeTarget target : refill) {
+            if (wanted.stream().anyMatch(stack -> ItemStack.areItemsAndComponentsEqual(stack, target.stack()))) continue;
+            if (triedRefill && System.nanoTime() >= deadline) break;
+            triedRefill = true;
+            BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
+            NativePlacementSolver.Solution solution = solveNative(target, desired, moving, null);
+            if (solution == null) continue;
+            if (player.getAbilities().creativeMode) {
+                if (placementBudget && !hasBatch && inventoryManager.select(target.stack()) && prepareNativeRotation(solution)) {
+                    actionHandler.clearLookAction();
+                    addNativePlacement(target, desired, solution);
+                }
+                break;
+            }
+            int demand = (int) refill.stream().filter(other -> ItemStack.areItemsAndComponentsEqual(target.stack(), other.stack())).count();
+            wanted.add(target.stack().copyWithCount(demand));
+            if (wanted.size() == 3) break;
+        }
+        inventoryManager.stageMaterials(wanted, keep, !hasBatch && placementBudget);
+        return !nativeActions.isEmpty();
+    }
+
+    @Nullable
+    private NativePlacementSolver.Solution solveNative(NativeTarget target, BlockState desired, boolean moving,
+                                                       @Nullable NativePlacementSolver.Solution batch) {
+        double reach = getEffectivePrintingRange();
+        boolean allowAir = PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue();
+        if (!PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) {
+            return allowAir ? NativePlacementSolver.solveAnyRotation(target.pos(), desired, target.stack(), reach) : null;
+        }
+        if (batch != null) {
+            return NativePlacementSolver.solveMovingAtRotation(target.pos(), desired, target.stack(), reach, allowAir,
+                    player.isSprinting(), batch.yaw(), batch.pitch());
+        }
+        return moving ? NativePlacementSolver.solveMoving(target.pos(), desired, target.stack(), reach, allowAir, player.isSprinting())
+                : NativePlacementSolver.solveStationary(target.pos(), desired, target.stack(), reach, allowAir);
+    }
+
+    private boolean prepareNativeRotation(NativePlacementSolver.Solution solution) {
+        return solution.anyRotation() || (PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()
+                && MovementHandler.requestRotation(solution.yaw(), solution.pitch()));
+    }
+
+    private void addNativePlacement(NativeTarget target, BlockState desired, NativePlacementSolver.Solution solution) {
+        BlockState actionTarget = NativeAttachment.hasFaces(desired) ? solution.predicted() : desired;
+        nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution, true));
+    }
+
+    private record NativeTarget(BlockPos pos, BlockState state, ItemStack stack, int offset) {}
 
     private boolean isNativePlacementCandidate(SchematicBlockState state, java.util.Set<BlockPos> playerOccupied) {
         if (state.targetState == null || state.targetState.isAir()) return false;
@@ -519,27 +622,146 @@ public class Printer {
         // ACK only acknowledges processing, not success. Wait for block state
         // packets, with a bounded retry if no authoritative state arrives.
         int waitTicks = MathHelper.clamp((latency * 2 + 750) / 50, 15, 60);
-        pendingPlacements.put(pos.toImmutable(), new PendingPlacement(desired, stack.copyWithCount(1),
-                sequence, waitTicks));
+        PendingPlacement pending = new PendingPlacement(desired, stack.copyWithCount(1), sequence, waitTicks);
+        pendingPlacements.put(pos.toImmutable(), pending);
+        if (sequence >= 0 && stack.getItem() instanceof BlockItem) {
+            pendingBlockChanges.put(pos.toImmutable(), new BlockChange(desired, sequence, waitTicks, false));
+            if (desired.getBlock() instanceof BedBlock && desired.get(BedBlock.PART) == BedPart.FOOT) {
+                pendingBlockChanges.put(pos.offset(desired.get(BedBlock.FACING)),
+                        new BlockChange(desired.with(BedBlock.PART, BedPart.HEAD), sequence, waitTicks, true));
+            } else if ((desired.getBlock() instanceof DoorBlock || (desired.getBlock() instanceof TallPlantBlock
+                    && !(desired.getBlock() instanceof PitcherCropBlock))) && desired.get(DoorBlock.HALF) == DoubleBlockHalf.LOWER) {
+                pendingBlockChanges.put(pos.up(), new BlockChange(desired.with(DoorBlock.HALF, DoubleBlockHalf.UPPER), sequence, waitTicks, true));
+            } else if (desired.getBlock() instanceof PaleMossCarpetBlock && desired.get(PaleMossCarpetBlock.BOTTOM)
+                    && Direction.Type.HORIZONTAL.stream().anyMatch(side -> desired.get(PaleMossCarpetBlock.getWallShape(side)) != WallShape.NONE)) {
+                // The server randomly chooses which fronds to grow above the base.
+                pendingBlockChanges.put(pos.up(), new BlockChange(null, sequence, waitTicks, true));
+            }
+        }
+        if (sequence >= 0 && stack.getItem() instanceof net.minecraft.item.BlockItem && client.player != null
+                && !client.player.getAbilities().creativeMode) {
+            int slot = client.player.getInventory().selectedSlot;
+            ItemStack held = client.player.getInventory().getStack(slot);
+            if (ItemStack.areItemsAndComponentsEqual(held, stack)) {
+                SlotStock stock = pendingStock.computeIfAbsent(slot, ignored -> new SlotStock(held));
+                pending.stockSlot = slot;
+                pending.stockCheckTick = client.player.age + waitTicks;
+                stock.uses.add(pending);
+            }
+        }
     }
 
     public static boolean hasPendingPlacement(BlockPos pos) {
-        return pendingPlacements.containsKey(pos);
+        BlockChange change = pendingBlockChanges.get(pos);
+        return pendingPlacements.containsKey(pos)
+                || (change != null && change.companion && !change.matched && change.ticks > 0);
     }
 
-    public static int pendingItemCount(ItemStack stack) {
-        return (int) pendingPlacements.values().stream()
-                .filter(pending -> ItemStack.areItemsAndComponentsEqual(stack, pending.stack)).count();
+    private static boolean mayChange(BlockPos pos) {
+        return pendingBlockChanges.containsKey(pos) || pendingPlacements.containsKey(pos);
+    }
+
+    /** Called with the revalidated wire hit immediately before spending a placement packet. */
+    public static boolean dependsOnPendingBlock(BlockPos target, BlockState desired, ItemStack stack, BlockHitResult hit) {
+        if (!NativeAttachment.isSensitive(desired) || (pendingBlockChanges.isEmpty() && pendingPlacements.isEmpty())) return false;
+        BlockPos clicked = hit.getBlockPos();
+        if (mayChange(target) || mayChange(clicked)) return true;
+        var client = MinecraftClient.getInstance();
+        if (PrinterConfig.RAYCAST.getBooleanValue() && Boolean.TRUE.equals(BlockView.raycast(
+                client.player.getEyePos(), hit.getPos(), clicked,
+                (anchor, pos) -> !pos.equals(anchor) && mayChange(pos) ? Boolean.TRUE : null, anchor -> Boolean.FALSE))) {
+            return true;
+        }
+        Direction face = NativeAttachment.preferredFace(desired);
+        // Moving the clicked support to the front of vanilla's candidate order fixes the mount.
+        // revalidate() already checked that the held item actually produces the requested state on it.
+        boolean fixed = face != null && face == hit.getSide() && clicked.offset(face).equals(target)
+                && client.world.getBlockState(target).isAir() && !client.world.getBlockState(clicked).isReplaceable()
+                && !stack.contains(DataComponentTypes.BLOCK_STATE);
+        if (fixed) return false;
+        for (Direction side : Direction.values()) {
+            if (NativeAttachment.readsNeighbor(desired, side) && mayChange(target.offset(side))) return true;
+        }
+        return false;
+    }
+
+    public static void acknowledgeBlockActions(int sequence) {
+        acknowledgedSequence = Math.max(acknowledgedSequence, sequence);
+        pendingBlockChanges.values().removeIf(change -> change.sequence <= acknowledgedSequence && (change.matched || change.ticks <= 0));
+    }
+
+    private static final class BlockChange {
+        @Nullable final BlockState predicted;
+        final int sequence;
+        final boolean companion;
+        int ticks;
+        boolean matched;
+
+        BlockChange(@Nullable BlockState predicted, int sequence, int ticks, boolean companion) {
+            this.predicted = predicted;
+            this.sequence = sequence;
+            this.ticks = ticks;
+            this.companion = companion;
+        }
+    }
+
+    public static int pendingSlotCount(int slot, ItemStack held) {
+        SlotStock stock = pendingStock.get(slot);
+        if (stock == null) return 0;
+        // Until an authority publishes a replacement, a local edit cannot turn an outstanding use into credit.
+        return ItemStack.areItemsAndComponentsEqual(stock.item, held) ? stock.uses.size() : Integer.MAX_VALUE;
+    }
+
+    static void resetStock() {
+        pendingStock.clear();
+    }
+
+    /** Reconcile uses against the inventory stream independently of world block publications. */
+    public static void observeHotbarContent(int slot, ItemStack content) {
+        SlotStock stock = pendingStock.get(slot);
+        if (stock == null) return;
+        int count = ItemStack.areItemsAndComponentsEqual(stock.item, content) ? content.getCount() : 0;
+        int spent = stock.publishedCount - count;
+        for (PendingPlacement use : stock.uses) {
+            if (spent <= 0) break;
+            if (!use.stockPublished) {
+                use.stockPublished = true;
+                spent--;
+            }
+        }
+        stock.publishedCount = count;
+        settleStock(slot, stock);
+    }
+
+    private static void settleStock(int slot, SlotStock stock) {
+        stock.uses.removeIf(use -> use.stockPublished && use.blockPublished);
+        if (stock.uses.isEmpty()) pendingStock.remove(slot);
+    }
+
+    /** The manager kept this slot reserved from the ordered refresh request through its response. */
+    public static void reconcileHotbarSlot(int slot, ItemStack actual) {
+        var player = MinecraftClient.getInstance().player;
+        if (player != null && ItemStack.areEqual(actual, player.getInventory().getStack(slot))) pendingStock.remove(slot);
     }
 
     /** Invoked on the client thread after vanilla applies a block update. */
     public static void confirmNativePlacement(BlockPos pos, BlockState actual) {
+        BlockChange change = pendingBlockChanges.get(pos);
+        if (change != null) {
+            if (change.sequence <= acknowledgedSequence) pendingBlockChanges.remove(pos);
+            else change.matched = actual.equals(change.predicted);
+        }
         PendingPlacement pending = pendingPlacements.get(pos);
         if (pending != null && pending.stack.isEmpty() && actual.isOf(pending.desired.getBlock())) {
             var property = MovingPrinterAction.tuningProperty(pending.desired);
             if (property != null && !actual.get(property).equals(pending.desired.get(property))) return;
         }
         pendingPlacements.remove(pos);
+        if (pending != null && pending.stockSlot >= 0) {
+            pending.blockPublished = true;
+            SlotStock stock = pendingStock.get(pending.stockSlot);
+            if (stock != null) settleStock(pending.stockSlot, stock);
+        }
         if (pending != null && PrinterConfig.PRINTER_DEBUG_LOG.getBooleanValue()) {
             if (pending.stack.isOf(net.minecraft.item.Items.WATER_BUCKET)) {
                 boolean filled = actual.isOf(pending.desired.getBlock())
@@ -557,12 +779,27 @@ public class Printer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (predictionWorld != client.world) {
             pendingPlacements.clear();
+            pendingBlockChanges.clear();
+            acknowledgedSequence = -1;
+            resetStock();
             blockPosTimeout.clear();
             placementRate.reset();
-            inventoryManager.reset();
+            inventoryManager.onPrinterContextChanged();
             predictionWorld = client.world;
         }
         pendingPlacements.entrySet().removeIf(entry -> --entry.getValue().ticks <= 0);
+        pendingBlockChanges.values().removeIf(change -> {
+            if (change.ticks > 0) change.ticks--;
+            return change.ticks == 0 && change.sequence <= acknowledgedSequence;
+        });
+        if (client.player != null) {
+            for (var entry : pendingStock.entrySet()) {
+                if (entry.getValue().uses.stream().anyMatch(use -> client.player.age - use.stockCheckTick >= 0)) {
+                    inventoryManager.requestStockReadback(entry.getKey());
+                    break;
+                }
+            }
+        }
     }
 
     public void onServerCorrection() {
@@ -577,12 +814,27 @@ public class Printer {
         private final ItemStack stack;
         private final int sequence;
         private int ticks;
+        private int stockSlot = -1;
+        private int stockCheckTick;
+        private boolean blockPublished;
+        private boolean stockPublished;
 
         private PendingPlacement(BlockState desired, ItemStack stack, int sequence, int ticks) {
             this.desired = desired;
             this.stack = stack;
             this.sequence = sequence;
             this.ticks = ticks;
+        }
+    }
+
+    private static final class SlotStock {
+        final ItemStack item;
+        int publishedCount;
+        final List<PendingPlacement> uses = new ArrayList<>();
+
+        SlotStock(ItemStack stack) {
+            item = stack.copyWithCount(1);
+            publishedCount = stack.getCount();
         }
     }
 

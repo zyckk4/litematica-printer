@@ -21,6 +21,7 @@ abstract public class InteractAction extends Action {
 
     @Override
     public boolean send(MinecraftClient client, ClientPlayerEntity player) {
+        if (!Printer.inventoryManager.canUseSelectedSlot(player)) return false;
         ActionResult result = interact(client, player, Hand.MAIN_HAND, context.hitResult);
 
         // Keep the action queued when the client rejected the interaction.  A

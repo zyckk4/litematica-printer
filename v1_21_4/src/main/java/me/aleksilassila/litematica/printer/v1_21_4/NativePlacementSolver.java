@@ -5,6 +5,7 @@ import me.aleksilassila.litematica.printer.v1_21_4.implementation.NativePlacemen
 import net.minecraft.block.*;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.block.enums.WallShape;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.component.DataComponentTypes;
@@ -119,7 +120,7 @@ public final class NativePlacementSolver {
     }
 
     public static boolean canAddFaces(BlockState current, BlockState desired) {
-        if (!(desired.getBlock() instanceof MultifaceBlock) || !current.isOf(desired.getBlock())) return false;
+        if (!NativeAttachment.hasFaces(desired) || !current.isOf(desired.getBlock())) return false;
         boolean missing = false;
         for (Direction direction : Direction.values()) {
             BooleanProperty face = MultifaceBlock.getProperty(direction);
@@ -134,7 +135,7 @@ public final class NativePlacementSolver {
 
     /** Allow one new planned face, chosen from the hits that are reachable now. */
     public static boolean matchesNextPlacement(BlockView current, BlockPos target, BlockState desired, BlockState predicted) {
-        if (!(desired.getBlock() instanceof MultifaceBlock)) return statesMatch(desired, predicted);
+        if (!NativeAttachment.hasFaces(desired)) return statesMatch(desired, predicted);
         if (predicted == null || !predicted.isOf(desired.getBlock())) return false;
         BlockState before = current.getBlockState(target);
         boolean sameBlock = before.isOf(desired.getBlock());
@@ -249,7 +250,7 @@ public final class NativePlacementSolver {
         return solution;
     }
 
-    /** Rotation-independent airplace, or an inside support for a target just outside the border. */
+    /** Rotation-independent target click or an explicit attachment or border support. */
     public static Solution solveAnyRotation(BlockPos target, BlockState desired, ItemStack stack, double reach) {
         if (!canSolve(target, stack)) return null;
         return solveAnyRotation(target, desired, stack, candidates(target, desired, reach, true, false));
@@ -261,7 +262,7 @@ public final class NativePlacementSolver {
         for (HitCandidate candidate : hits) {
             BlockState predicted = simulate(target, stack, candidate.hit(), player.getYaw(), player.getPitch());
             if (!matchesNextPlacement(MinecraftClient.getInstance().world, target, desired, predicted)) continue;
-            BlockState stableTarget = desired.getBlock() instanceof MultifaceBlock ? predicted : desired;
+            BlockState stableTarget = NativeAttachment.hasFaces(desired) ? predicted : desired;
             boolean stable = true;
             for (float[] rotation : OMNI_ROTATIONS) {
                 if (!statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation[0], rotation[1]))) {
@@ -287,7 +288,7 @@ public final class NativePlacementSolver {
             for (Rotation rotation : rotations) {
                 BlockState result = simulate(target, stack, candidate.hit(), rotation.yaw(), rotation.pitch());
                 if (!matchesNextPlacement(MinecraftClient.getInstance().world, target, desired, result)) continue;
-                BlockState stableTarget = desired.getBlock() instanceof MultifaceBlock ? result : desired;
+                BlockState stableTarget = NativeAttachment.hasFaces(desired) ? result : desired;
                 // Avoid nearest-direction boundaries while the player is moving.
                 if (!statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation.yaw() - 1.0F, rotation.pitch()))
                         || !statesMatch(stableTarget, simulate(target, stack, candidate.hit(), rotation.yaw() + 1.0F, rotation.pitch()))) continue;
@@ -308,7 +309,7 @@ public final class NativePlacementSolver {
                 && validHit(target, mc.player.getEyePos(), hit, effectiveReach(reach))) {
             BlockState predicted = simulate(target, stack, hit, yaw, pitch);
             if (matchesNextPlacement(mc.world, target, desired, predicted)
-                    && (!(desired.getBlock() instanceof MultifaceBlock) || statesMatch(desired, predicted))) {
+                    && (!NativeAttachment.hasFaces(desired) || statesMatch(desired, predicted))) {
                 return new Solution(hit, predicted, yaw, pitch, solution.yawStep(), solution.airPlace(), solution.anyRotation());
             }
         }
@@ -317,7 +318,7 @@ public final class NativePlacementSolver {
         // Reusing the old point alone needlessly dropped a whole moving batch.
         Solution refreshed = solveRotations(target, desired, stack,
                 candidates(target, desired, reach, solution.airPlace(), true), List.of(new Rotation(yaw, pitch, solution.yawStep())));
-        if (refreshed != null && desired.getBlock() instanceof MultifaceBlock && !statesMatch(desired, refreshed.predicted())) return null;
+        if (refreshed != null && NativeAttachment.hasFaces(desired) && !statesMatch(desired, refreshed.predicted())) return null;
         return refreshed == null ? null : new Solution(refreshed.hit(), refreshed.predicted(), yaw, pitch,
                 solution.yawStep(), refreshed.airPlace(), solution.anyRotation());
     }
@@ -394,11 +395,16 @@ public final class NativePlacementSolver {
                 for (Direction face : Direction.values()) {
                     Vec3d sample = center.add(face.getOffsetX() * box.getLengthX() / 2,
                             face.getOffsetY() * box.getLengthY() / 2, face.getOffsetZ() * box.getLengthZ() / 2);
-                    addHit(result, target, eye, target, face, sample, false, reach);
+                    if (!hasOutlinePoint(result, face, sample)) addHit(result, target, eye, target, face, sample, false, reach);
                 }
             }
             return result;
         }
+        // A real click on the schematic mount puts that support first in the item's
+        // placement context. Clicking the empty target leaves the choice to the
+        // server, where a preceding packet may already have added another support.
+        Direction mountFace = targetState.isReplaceable() ? NativeAttachment.preferredFace(desired) : null;
+        if (mountFace != null) addSupport(result, target, eye, mountFace.getOpposite(), reach);
         if (allowAir && targetState.isReplaceable()) {
             for (Direction face : Direction.values()) addFace(result, target, eye, target, face, true, reach);
         } else if ((allowSupports || canCompleteSlab(targetState, desired)) && targetState.getBlock() instanceof SlabBlock
@@ -409,14 +415,19 @@ public final class NativePlacementSolver {
         }
         if (allowSupports) {
             for (Direction side : Direction.values()) {
-                BlockPos support = target.offset(side);
-                BlockState state = mc.world.getBlockState(support);
-                if (!state.isReplaceable() && canClick(state) && !state.getOutlineShape(mc.world, support).isEmpty()) {
-                    addFace(result, target, eye, support, side.getOpposite(), false, reach);
-                }
+                if (side.getOpposite() != mountFace) addSupport(result, target, eye, side, reach);
             }
         }
         return result;
+    }
+
+    private static void addSupport(List<HitCandidate> hits, BlockPos target, Vec3d eye, Direction side, double reach) {
+        var world = MinecraftClient.getInstance().world;
+        BlockPos support = target.offset(side);
+        BlockState state = world.getBlockState(support);
+        if (!state.isReplaceable() && canClick(state) && !state.getOutlineShape(world, support).isEmpty()) {
+            addFace(hits, target, eye, support, side.getOpposite(), false, reach);
+        }
     }
 
     private static void addFace(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block,
@@ -426,21 +437,35 @@ public final class NativePlacementSolver {
         // near edges without requiring the face centre to be inside reach.
         double eyeU = face.getAxis() == Direction.Axis.X ? eye.z - block.getZ() : eye.x - block.getX();
         double eyeV = face.getAxis() == Direction.Axis.Y ? eye.z - block.getZ() : eye.y - block.getY();
-        addHit(hits, target, eye, block, face, offset(center, face,
-                MathHelper.clamp(eyeU, 0.05, 0.95) - 0.5, MathHelper.clamp(eyeV, 0.05, 0.95) - 0.5), air, reach);
+        Vec3d nearest = offset(center, face, MathHelper.clamp(eyeU, 0.05, 0.95) - 0.5,
+                MathHelper.clamp(eyeV, 0.05, 0.95) - 0.5);
+        boolean addedNearest = addHit(hits, target, eye, block, face, nearest, air, reach);
+        // This block face is enumerated once. Only the eye projection can
+        // coincide with one of its distinct grid points.
         for (double u : SAMPLES) {
-            for (double v : SAMPLES) addHit(hits, target, eye, block, face, offset(center, face, u - 0.5, v - 0.5), air, reach);
+            for (double v : SAMPLES) {
+                Vec3d sample = offset(center, face, u - 0.5, v - 0.5);
+                if (!addedNearest || nearest.squaredDistanceTo(sample) >= 1.0E-12) {
+                    addHit(hits, target, eye, block, face, sample, air, reach);
+                }
+            }
         }
     }
 
-    private static void addHit(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block, Direction face,
-                                Vec3d sample, boolean air, double reach) {
-        BlockHitResult hit = new BlockHitResult(sample, face, block, false);
-        for (HitCandidate existing : hits) {
-            if (existing.hit().getBlockPos().equals(block) && existing.hit().getSide() == face
-                    && existing.hit().getPos().squaredDistanceTo(sample) < 1.0E-12) return;
+    // All outline boxes here belong to one target. Their faces can overlap.
+    private static boolean hasOutlinePoint(List<HitCandidate> hits, Direction face, Vec3d sample) {
+        for (HitCandidate candidate : hits) {
+            if (candidate.hit().getSide() == face && candidate.hit().getPos().squaredDistanceTo(sample) < 1.0E-12) return true;
         }
-        if (validHit(target, eye, hit, reach)) hits.add(new HitCandidate(hit, air));
+        return false;
+    }
+
+    private static boolean addHit(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block, Direction face,
+                                  Vec3d sample, boolean air, double reach) {
+        BlockHitResult hit = new BlockHitResult(sample, face, block, false);
+        if (!validHit(target, eye, hit, reach)) return false;
+        hits.add(new HitCandidate(hit, air));
+        return true;
     }
 
     private static boolean validHit(BlockPos target, Vec3d eye, BlockHitResult hit, double reach) {
@@ -553,6 +578,17 @@ public final class NativePlacementSolver {
     public static boolean statesMatch(BlockState desired, BlockState actual) {
         if (desired == null || actual == null) return false;
         if (TorchPlacement.isTorch(desired)) return TorchPlacement.matches(desired, actual);
+        if (desired.getBlock() instanceof PaleMossCarpetBlock) {
+            if (!actual.isOf(desired.getBlock())
+                    || !desired.get(PaleMossCarpetBlock.BOTTOM).equals(actual.get(PaleMossCarpetBlock.BOTTOM))) return false;
+            // A base's LOW side can grow TALL when the game creates an upper
+            // frond after placement. The side itself must match the schematic.
+            for (Direction direction : Direction.Type.HORIZONTAL) {
+                var side = PaleMossCarpetBlock.getWallShape(direction);
+                if ((desired.get(side) == WallShape.NONE) != (actual.get(side) == WallShape.NONE)) return false;
+            }
+            return true;
+        }
         // Planting bamboo starts as a shoot; subsequent growth/upper placement
         // changes it into bamboo. Never generalize this to arbitrary block types.
         if (desired.isOf(Blocks.BAMBOO) && actual.isOf(Blocks.BAMBOO_SAPLING)) return true;
@@ -570,8 +606,9 @@ public final class NativePlacementSolver {
                     || desired.getBlock() instanceof TrapdoorBlock || desired.getBlock() instanceof FenceGateBlock)) continue;
             if (name.equals("mode") && desired.getBlock() instanceof ComparatorBlock) continue;
             if (name.equals("shape") && desired.getBlock() instanceof StairsBlock) continue;
-            if (PrinterConfig.PRINTER_IGNORE_ROTATION.getBooleanValue() && ROTATION_PROPERTIES.contains(name)) continue;
-            if (CONNECTION_PROPERTIES.contains(name) && !(desired.getBlock() instanceof MultifaceBlock)) continue;
+            if (PrinterConfig.PRINTER_IGNORE_ROTATION.getBooleanValue() && ROTATION_PROPERTIES.contains(name)
+                    && !(name.equals("facing") && NativeAttachment.facingDeterminesMount(desired))) continue;
+            if (CONNECTION_PROPERTIES.contains(name) && !NativeAttachment.hasFaces(desired)) continue;
             if (!actual.contains(property) || !desired.get(property).equals(actual.get(property))) return false;
         }
         return true;

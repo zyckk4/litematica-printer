@@ -8,17 +8,21 @@ import me.aleksilassila.litematica.printer.v1_21_4.config.PrinterConfig;
 import me.aleksilassila.litematica.printer.v1_21_4.mixin.MixinAccessorClientPlayerEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.input.Input;
+import net.minecraft.client.network.ClientCommonNetworkHandler;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.network.PendingUpdateManager;
 import net.minecraft.client.option.GameOptions;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.tutorial.TutorialManager;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityDimensions;
+import net.minecraft.entity.EntityPose;
 import net.minecraft.entity.player.ItemCooldownManager;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.entity.player.PlayerEntity;
@@ -26,6 +30,7 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.ClientStatusC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.screen.PlayerScreenHandler;
@@ -51,6 +56,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /** Small live-method fixture: real printer actions, captured network and inventory sinks. */
 final class StateInteractionTestFixture implements AutoCloseable {
@@ -77,6 +84,7 @@ final class StateInteractionTestFixture implements AutoCloseable {
         set(MinecraftClient.class, null, "instance", client);
         set(MinecraftClient.class, client, "runDirectory", Path.of(".").toFile());
         player = (FixturePlayer) unsafe.allocateInstance(FixturePlayer.class);
+        set(ClientPlayerEntity.class, player, "client", client);
         player.inventory = new PlayerInventory(player);
         player.abilities = new PlayerAbilities();
         player.abilities.allowModifyWorld = true;
@@ -89,12 +97,13 @@ final class StateInteractionTestFixture implements AutoCloseable {
         player.cooldowns = new ItemCooldownManager();
         player.reach = 4.5;
         network = (FixtureNetwork) unsafe.allocateInstance(FixtureNetwork.class);
-        network.inputs = new ArrayList<>(); network.blockPackets = new ArrayList<>();
+        network.packets = new ArrayList<>(); network.inputs = new ArrayList<>(); network.blockPackets = new ArrayList<>();
         set(ClientPlayerEntity.class, player, "networkHandler", network);
         interaction = (FixtureInteraction) unsafe.allocateInstance(FixtureInteraction.class);
         set(ClientPlayerInteractionManager.class, interaction, "client", client);
         set(ClientPlayerInteractionManager.class, interaction, "networkHandler", network);
         world = (FixtureWorld) unsafe.allocateInstance(FixtureWorld.class);
+        world.blockEntities = new HashMap<>();
         world.blocks = new HashMap<>(); world.border = new WorldBorder();
         var builtins = BuiltinRegistries.createWrapperLookup();
         var dimension = builtins.getOrThrow(RegistryKeys.DIMENSION_TYPE).getOrThrow(DimensionTypes.OVERWORLD);
@@ -109,12 +118,13 @@ final class StateInteractionTestFixture implements AutoCloseable {
         set(Entity.class, player, "dimensions", EntityDimensions.fixed(0.6F, 1.8F));
         set(Entity.class, player, "blockPos", new BlockPos(0, 64, 0));
         GameOptions options = (GameOptions) unsafe.allocateInstance(GameOptions.class);
-        for (String name : List.of("sneakKey", "forwardKey", "backKey", "leftKey", "rightKey"))
+        for (String name : List.of("sneakKey", "forwardKey", "backKey", "leftKey", "rightKey", "jumpKey", "sprintKey"))
             set(GameOptions.class, options, name, unsafe.allocateInstance(KeyBinding.class));
         set(MinecraftClient.class, client, "options", options);
         set(MinecraftClient.class, client, "cameraEntity", player);
         client.player = player; client.world = world; client.interactionManager = interaction;
         schematic = (FixtureSchematic) unsafe.allocateInstance(FixtureSchematic.class);
+        schematic.blockEntities = new HashMap<>();
         schematic.blocks = new HashMap<>();
         set(SchematicWorldHandler.class, SchematicWorldHandler.INSTANCE, "world", schematic);
         previousInventoryClient = (MinecraftClient) field(InventoryManager.class, "mc").get(Printer.inventoryManager);
@@ -140,8 +150,11 @@ final class StateInteractionTestFixture implements AutoCloseable {
 
     Printer reset() throws Exception {
         world.blocks.clear(); schematic.blocks.clear();
-        network.inputs.clear(); network.blockPackets.clear();
+        world.blockEntities.clear(); schematic.blockEntities.clear();
+        network.packets.clear(); network.inputs.clear(); network.blockPackets.clear();
+        network.packetSink = null;
         interaction.blockUses = 0;
+        interaction.swapSink = null;
         fill(ItemStack.EMPTY);
         player.inventory.selectedSlot = 0; player.offhand = new ItemStack(Items.TORCH, 12);
         player.sneaking = false; player.reach = 4.5; player.age++;
@@ -161,6 +174,17 @@ final class StateInteractionTestFixture implements AutoCloseable {
     void fill(ItemStack stack) {
         for (int i = 0; i < 36; i++) player.inventory.main.set(i, stack.copy());
     }
+
+    void enableInventoryPacketApplication() throws Exception {
+        // The packet handlers use this initialized player menu and apply on the fixture thread.
+        var screen = new PlayerScreenHandler(player.inventory, false, player);
+        set(PlayerEntity.class, player, "playerScreenHandler", screen);
+        player.currentScreenHandler = screen;
+        set(ClientCommonNetworkHandler.class, network, "client", client);
+        set(MinecraftClient.class, client, "thread", Thread.currentThread());
+        set(MinecraftClient.class, client, "tutorialManager", new TutorialManager(client, client.options));
+    }
+
     void target(BlockState current, BlockState desired) {
         world.blocks.put(TARGET, current); schematic.blocks.put(TARGET, desired);
     }
@@ -196,7 +220,9 @@ final class StateInteractionTestFixture implements AutoCloseable {
 
     static final class FixtureSchematic extends WorldSchematic {
         Map<BlockPos, BlockState> blocks;
+        Map<BlockPos, BlockEntity> blockEntities;
         private FixtureSchematic() { super(null, null, null, null); }
+        @Override public BlockEntity getBlockEntity(BlockPos pos) { return blockEntities.get(pos); }
         @Override public BlockState getBlockState(BlockPos pos) { return blocks.getOrDefault(pos, Blocks.AIR.getDefaultState()); }
         @Override public boolean setBlockState(BlockPos pos, BlockState state, int flags) {
             // MaterialCache reapplies the state before selecting its item.
@@ -206,9 +232,11 @@ final class StateInteractionTestFixture implements AutoCloseable {
     }
     static final class FixtureWorld extends ClientWorld {
         Map<BlockPos, BlockState> blocks;
+        Map<BlockPos, BlockEntity> blockEntities;
         WorldBorder border;
         DimensionType dimension;
         private FixtureWorld() { super(null, null, null, null, 0, 0, null, false, 0L, 0); }
+        @Override public BlockEntity getBlockEntity(BlockPos pos) { return blockEntities.get(pos); }
         @Override public BlockState getBlockState(BlockPos pos) { return blocks.getOrDefault(pos, Blocks.AIR.getDefaultState()); }
         @Override public net.minecraft.fluid.FluidState getFluidState(BlockPos pos) { return getBlockState(pos).getFluidState(); }
         @Override public boolean isClient() { return true; }
@@ -234,6 +262,14 @@ final class StateInteractionTestFixture implements AutoCloseable {
         @Override public ItemStack getOffHandStack() { return offhand; }
         @Override public boolean isSneaking() { return sneaking; }
         @Override public boolean isAlive() { return true; }
+        @Override public EntityPose getPose() { return EntityPose.STANDING; }
+        @Override public boolean isSleeping() { return false; }
+        @Override public boolean hasVehicle() { return false; }
+        @Override public boolean isGliding() { return false; }
+        @Override public boolean isSwimming() { return false; }
+        @Override public boolean isTouchingWater() { return false; }
+        @Override public boolean isInLava() { return false; }
+        @Override public boolean isClimbing() { return false; }
         @Override public boolean isUsingItem() { return false; }
         @Override public boolean isSprinting() { return false; }
         @Override public boolean isDescending() { return sneaking; }
@@ -244,23 +280,32 @@ final class StateInteractionTestFixture implements AutoCloseable {
         @Override public void swingHand(Hand hand) {}
     }
     static final class FixtureNetwork extends ClientPlayNetworkHandler {
+        List<Packet<?>> packets;
         List<PlayerInput> inputs;
         List<PlayerInteractBlockC2SPacket> blockPackets;
+        Consumer<Packet<?>> packetSink;
         private FixtureNetwork() { super(null, null, null); }
         @Override public net.minecraft.client.network.PlayerListEntry getPlayerListEntry(java.util.UUID uuid) { return null; }
         @Override public void sendPacket(Packet<?> packet) {
+            if (packet instanceof ClientStatusC2SPacket status && status.getMode() == ClientStatusC2SPacket.Mode.REQUEST_STATS) {
+                InventoryFenceOrder.get(this).sent(status);
+            }
+            packets.add(packet);
             if (packet instanceof PlayerInputC2SPacket input) inputs.add(input.input());
             if (packet instanceof PlayerInteractBlockC2SPacket block) blockPackets.add(block);
+            if (packetSink != null) packetSink.accept(packet);
         }
     }
     static final class FixtureInteraction extends ClientPlayerInteractionManager {
         int blockUses;
+        BiConsumer<Integer, Integer> swapSink;
         private FixtureInteraction() { super(null, null); }
         @Override public void clickSlot(int syncId, int slotId, int button, SlotActionType type, PlayerEntity player) {
             if (type != SlotActionType.SWAP || slotId < 9 || slotId >= 36) throw new AssertionError("Unexpected inventory operation");
             ItemStack old = player.getInventory().main.get(button);
             player.getInventory().main.set(button, player.getInventory().main.get(slotId));
             player.getInventory().main.set(slotId, old);
+            if (swapSink != null) swapSink.accept(slotId, button);
         }
         @Override public ActionResult interactBlock(ClientPlayerEntity player, Hand hand, BlockHitResult hit) {
             blockUses++;

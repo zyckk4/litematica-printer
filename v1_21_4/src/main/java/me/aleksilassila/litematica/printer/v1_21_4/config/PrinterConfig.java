@@ -33,6 +33,8 @@ public class PrinterConfig {
     }
 
     public static final ConfigInteger TICK_DELAY = new ConfigInteger("printerTickDelay", 0, 0, 100, "Ticks between scans. 0 scans every tick; interactions also obey the configured rolling window and per-tick burst.");
+    public static final ConfigInteger MIN_SIGN_DELAY_MS = new ConfigInteger("printerMinSignDelayMs", 500, 0, 10_000,
+            "Minimum milliseconds from each sign editor request to submitting its text. 0 submits immediately. Delayed edits send up to 20 per client tick.");
     public static final ConfigInteger NATIVE_BURST = new ConfigInteger("printerInteractionBurst", 9, 1, 64,
             "Maximum printer interactions per tick, within the remaining rolling-window budget. Default: 9. Lower this on servers that reject bursts.");
     public static final ConfigInteger INTERACTION_WINDOW_MS = new ConfigInteger("printerInteractionWindowMs", 310, 1, PlacementRateLimiter.MAX_WINDOW_MILLIS,
@@ -43,7 +45,8 @@ public class PrinterConfig {
     public static final ConfigBoolean ROTATE_PLAYER = new ConfigBoolean("printerRotatePlayer", false, "Rotate the player to face the block to place.");
     public static final ConfigBoolean PRINTER_GRIM_ROTATION = new ConfigBoolean("printerGrimRotate", true, "Allows you to place blocks anywhere while walking or using baritone.");
     public static final ConfigBoolean STOP_ON_MOVEMENT = new ConfigBoolean("printerStopOnMovement", false, "Stop the printer if the player velocity is to high.");
-    public static final ConfigInteger INVENTORY_DELAY = new ConfigInteger("printerInventoryDelay", 10, 0, 100, "The delay between each inventory action. 0 = no delay.");
+    public static final ConfigInteger INVENTORY_DELAY = new ConfigInteger("printerInventoryDelay", 10, 0, 100,
+            "Inventory recovery interval in client ticks (minimum 10). Refilled slots become available after the server processes the group and their contents are verified.");
     public static final ConfigOptionList PRINTER_INVENTORY_MANAGEMENT_MODE = new ConfigOptionList("printerInventoryManagementMode", InventoryManagementModeEnum.LEAST_USED, "Inventory management mode. Rolling = cycle through the hotbar, Least Used = use the least used slot in the hotbar.");
     public static final ConfigBoolean RAYCAST = new ConfigBoolean("printerRaycast", false, "Raycast the block to place to check if it is obstructed by another block. Most anti cheat don't check for this.");
     public static final ConfigBoolean NO_PLACEMENT_CACHE = new ConfigBoolean("printerNoPlacementCache", false, "Disable the placement cache. This may cause more lag.");
@@ -81,6 +84,7 @@ public class PrinterConfig {
     public ImmutableList<IConfigBase> getOptions() {
         List<IConfigBase> list = new java.util.ArrayList<>(Configs.Generic.OPTIONS);
         list.add(TICK_DELAY);
+        list.add(MIN_SIGN_DELAY_MS);
         list.add(NATIVE_BURST);
         list.add(INTERACTION_WINDOW_MS);
         list.add(INTERACTION_WINDOW_LIMIT);

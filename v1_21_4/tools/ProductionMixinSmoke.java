@@ -23,7 +23,7 @@ public final class ProductionMixinSmoke {
                 "net.minecraft.item.AxeItem", "net.minecraft.client.network.ClientPlayerEntity",
                 "net.minecraft.client.option.KeyBinding", "net.minecraft.client.render.Camera",
                 "net.minecraft.entity.Entity", "net.minecraft.client.Mouse",
-                "net.minecraft.client.network.ClientPlayNetworkHandler",
+                "net.minecraft.client.network.ClientPlayNetworkHandler", "net.minecraft.network.ClientConnection",
                 "net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket",
                 "fi.dy.masa.litematica.config.Configs", "fi.dy.masa.litematica.gui.GuiConfigs",
                 "fi.dy.masa.litematica.event.InputHandler",
@@ -39,9 +39,17 @@ public final class ProductionMixinSmoke {
                 {"net.minecraft.client.network.ClientPlayerEntity", "printer$movementYaw"},
                 {"net.minecraft.client.network.ClientPlayerEntity", "printer$declareInput"},
                 {"net.minecraft.client.network.ClientPlayerEntity", "printer$flushNativePlacement"},
+                {"net.minecraft.client.network.ClientPlayerEntity", "printer$queueSignText"},
                 {"net.minecraft.entity.Entity", "printer$movementSpeed"},
                 {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$blockUpdate"},
                 {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$correction"},
+                {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$inventoryReadbackFence"},
+                {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$inventorySlot"},
+                {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$fullInventory"},
+                {"net.minecraft.network.ClientConnection", "printer$recordStatisticsWrite"},
+                {"net.minecraft.network.ClientConnection", "printer$recordQueuedLook"},
+                {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$acknowledgeBlockActions"},
+                {"net.minecraft.client.network.ClientPlayerEntity", "printer$prepareMovementLook"},
                 {"net.minecraft.client.render.Camera", "onUpdateSetRotationArgs"},
                 {"net.minecraft.client.Mouse", "updateMouseChangeLookDirection"},
                 {"net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket", "modifyLookYaw"},
@@ -59,7 +67,7 @@ public final class ProductionMixinSmoke {
         if (knot.isDevelopment() || !knot.getMappingConfiguration().getRuntimeNamespace().equals("intermediary")) {
             throw new AssertionError("This check did not use production intermediary mode");
         }
-        System.out.println("PASS: 13 distinct targets covering all 15 printer mixins; 13 key handlers; production intermediary namespace.");
+        System.out.println("PASS: " + targets.length + " transformed targets and " + handlers.length + " injected handlers in production intermediary namespace.");
         System.out.println("No Minecraft main, game window, world, or server connection was started. This verifies artifact loading, not gameplay.");
     }
 }

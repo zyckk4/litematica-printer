@@ -33,6 +33,8 @@ import net.minecraft.fluid.FluidState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
+import net.minecraft.network.packet.c2s.play.ClientStatusC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
@@ -46,6 +48,7 @@ import net.minecraft.registry.SimpleRegistry;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvent;
@@ -53,6 +56,7 @@ import net.minecraft.state.property.Properties;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.PlayerInput;
+import net.minecraft.util.collection.DefaultedList;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
@@ -85,9 +89,13 @@ public final class InteractionRegressionChecks {
         MinecraftClient previous = MinecraftClient.getInstance();
         String slots = PrinterConfig.PRINTER_HOTBAR_SLOTS.getStringValue();
         try {
-            Fixture fixture = createFixture();
-            checkEmptyHandSelection(fixture);
-            checkWaterlogging(fixture);
+            checkEmptyHandSelection(createFixture());
+            checkRefillReadiness(createFixture());
+            checkAuthoritativeRefillRecovery(createFixture());
+            checkGroupFences(createFixture());
+            checkRefillSessionChange(createFixture());
+            checkRefillPlayerReplacement(createFixture());
+            checkWaterlogging(createFixture());
         } finally {
             set(MinecraftClient.class, null, "instance", previous);
             PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString(slots);
@@ -172,6 +180,8 @@ public final class InteractionRegressionChecks {
         set(PlayerEntity.class, player, "abilities", player.abilities);
         player.offhand = new ItemStack(Items.TORCH, 12);
         PlayerScreenHandler screen = (PlayerScreenHandler) unsafe.allocateInstance(PlayerScreenHandler.class);
+        set(ScreenHandler.class, screen, "slots", DefaultedList.ofSize(PlayerScreenHandler.OFFHAND_ID + 1,
+                (Slot) unsafe.allocateInstance(Slot.class)));
         screen.setCursorStack(ItemStack.EMPTY);
         set(PlayerEntity.class, player, "playerScreenHandler", screen);
         player.currentScreenHandler = screen;
@@ -191,9 +201,7 @@ public final class InteractionRegressionChecks {
         FixturePlayer player = fixture.player;
         FixtureInteraction interaction = fixture.interaction;
         PlayerScreenHandler screen = player.playerScreenHandler;
-        Constructor<InventoryManager> constructor = InventoryManager.class.getDeclaredConstructor();
-        constructor.setAccessible(true);
-        InventoryManager manager = constructor.newInstance();
+        InventoryManager manager = newInventoryManager();
         SchematicBlockState state = (SchematicBlockState) unsafe.allocateInstance(SchematicBlockState.class);
         set(SchematicBlockState.class, state, "currentState", Blocks.LEVER.getDefaultState());
         set(SchematicBlockState.class, state, "targetState", Blocks.LEVER.getDefaultState().with(LeverBlock.POWERED, true));
@@ -207,7 +215,8 @@ public final class InteractionRegressionChecks {
         check(unavailable.slot(player) == -1, "Unavailable requirement mistaken for empty hand");
         check(manager.select(ItemStack.EMPTY), "Existing empty hotbar slot not selected");
         check(player.inventory.selectedSlot == 5, "Wrong empty hotbar slot selected");
-        check(interaction.swaps == 0 && interaction.creativeWrites == 0, "Empty hotbar selection changed inventory");
+        check(fixture.network.inventorySwaps == 0 && interaction.creativeWrites == 0,
+                "Empty hotbar selection changed inventory");
         check(new CycleStateGuide(state).canExecute(player), "Survival lever guide still blocked");
         player.sneaking = true;
         check(!new CycleStateGuide(state).canExecute(player), "User sneak input was overridden");
@@ -217,7 +226,8 @@ public final class InteractionRegressionChecks {
         player.abilities.creativeMode = true;
         check(empty.slot(player) == -1, "Creative mode invented an empty slot");
         check(!manager.select(ItemStack.EMPTY), "Full inventory accepted empty hand");
-        check(interaction.swaps == 0 && interaction.creativeWrites == 0, "Full inventory was cleared for empty hand");
+        check(fixture.network.inventorySwaps == 0 && interaction.creativeWrites == 0,
+                "Full inventory was cleared for empty hand");
         check(player.inventory.main.stream().allMatch(stack -> stack.isOf(Items.STONE)), "Existing stack was lost");
         player.abilities.creativeMode = false;
 
@@ -228,12 +238,22 @@ public final class InteractionRegressionChecks {
         player.inventory.main.set(12, ItemStack.EMPTY);
         check(empty.slot(player) == 12, "Empty main inventory slot not available to guide");
         ItemStack moved = player.inventory.main.get(2);
-        check(!manager.select(ItemStack.EMPTY), "Swap was used before settlement interval");
-        check(interaction.swaps == 1 && interaction.lastType == SlotActionType.SWAP, "Expected one nondestructive SWAP");
-        check(player.inventory.main.get(2).isEmpty() && player.inventory.main.get(12) == moved, "Swap lost displaced stack");
-        check(!manager.select(ItemStack.EMPTY), "Pending empty slot was used too early");
-        while (manager.delay > 0) manager.tick();
-        check(manager.select(ItemStack.EMPTY), "Settled empty hand not selected");
+        set(ScreenHandler.class, screen, "revision", 32766);
+        check(!manager.select(ItemStack.EMPTY), "Selected an empty hand before authoritative slot updates");
+        check(fixture.network.inventorySwaps == 1, "Expected one nondestructive SWAP");
+        ClickSlotC2SPacket request = fixture.network.latestSwap;
+        check(request.getSyncId() == screen.syncId && request.getRevision() == 32766 && request.getSlot() == 12 && request.getButton() == 2,
+                "Refill did not address the expected handler, revision, or slots");
+        check(player.inventory.main.get(2) == moved && player.inventory.main.get(12).isEmpty(),
+                "Unconfirmed refill mutated the local inventory");
+        player.inventory.main.set(2, ItemStack.EMPTY);
+        manager.onAuthoritativeSlot(screen.syncId, request.getRevision(), PlayerScreenHandler.HOTBAR_START + 2);
+        publishSlot(fixture, manager, 12, moved.copy());
+        check(!manager.select(ItemStack.EMPTY), "A stale hotbar revision completed a backpack-only update");
+        publishSlot(fixture, manager, 2, ItemStack.EMPTY);
+        check(!manager.select(ItemStack.EMPTY), "Released an empty hotbar from a pre-click snapshot");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(manager.select(ItemStack.EMPTY), "Authoritative empty hand was not selected");
         check(player.inventory.selectedSlot == 2, "Selected outside configured empty-hand staging slot");
         check(player.offhand.isOf(Items.TORCH) && player.offhand.getCount() == 12, "Offhand changed");
         check(interaction.creativeWrites == 0, "Empty hand used a creative item write");
@@ -245,6 +265,430 @@ public final class InteractionRegressionChecks {
         player.currentScreenHandler = other;
         check(!manager.select(ItemStack.EMPTY), "Open container guard was bypassed");
         player.currentScreenHandler = screen;
+    }
+
+    private static void checkRefillReadiness(Fixture fixture) throws Exception {
+        FixturePlayer player = fixture.player;
+        InventoryManager manager = newInventoryManager();
+        int previousDelay = PrinterConfig.INVENTORY_DELAY.getIntegerValue();
+        try {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(10);
+            PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("1,3,5");
+            InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+            ItemStack stone = new ItemStack(Items.STONE);
+            ItemStack dirt = new ItemStack(Items.DIRT);
+            ItemStack sand = new ItemStack(Items.SAND, 16);
+            ItemStack gravel = new ItemStack(Items.GRAVEL, 16);
+            fill(player, new ItemStack(Items.COBBLESTONE));
+            player.inventory.main.set(2, stone);
+            player.inventory.selectedSlot = 0;
+            player.inventory.main.set(4, dirt);
+            player.inventory.main.set(12, sand);
+            player.inventory.main.set(13, gravel);
+            int before = fixture.network.inventorySwaps;
+
+            check(!manager.prefetch(sand, List.of(stone, dirt)) && fixture.network.inventorySwaps == before,
+                    "Prefetch evicted a protected or selected stack");
+            check(manager.prefetch(sand, List.of(dirt)) && fixture.network.inventorySwaps == before + 1,
+                    "Prefetch did not stage the material in the available slot");
+            check(fixture.network.latestSwap.getButton() == 2 && player.inventory.selectedSlot == 0
+                            && player.inventory.main.get(2).isOf(Items.STONE) && player.inventory.main.get(4).isOf(Items.DIRT),
+                    "Unconfirmed prefetch changed the selected slot or the inventory");
+            check(manager.selectReadyHotbarMaterial(dirt), "Pending refill blocked a disjoint ready hotbar material");
+            check(!manager.selectReadyHotbarMaterial(sand), "Unconfirmed refill was available before a server response");
+            check(!manager.select(gravel) && fixture.network.inventorySwaps == before + 1,
+                    "A second refill started while the first was in flight");
+
+            // Reverse the notification order from the empty-hand test and send
+            // duplicate target updates before the backpack update is delivered.
+            publishSlot(fixture, manager, 2, sand.copy());
+            publishSlot(fixture, manager, 2, sand.copy());
+            check(!manager.hasReadyNativeMaterial(sand) && !manager.selectReadyHotbarMaterial(sand),
+                    "Repeated hotbar updates were mistaken for both endpoints");
+            check(manager.selectReadyHotbarMaterial(dirt), "Partial correction blocked a disjoint hotbar slot");
+            publishSlot(fixture, manager, 12, stone.copy());
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(manager.selectReadyHotbarMaterial(sand), "Exact authoritative pair did not settle immediately");
+
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(0);
+            PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("3");
+            InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+            check(!manager.canPrefetch() && manager.canStartRefill(), "Selected refill slot was treated as unavailable");
+            check(!manager.prefetch(gravel, List.of()) && fixture.network.inventorySwaps == before + 1,
+                    "Prefetch evicted the only refill slot while it was selected");
+            check(!manager.select(gravel) && fixture.network.inventorySwaps == before + 2,
+                    "Demand refill did not use the selected fallback");
+            check(!manager.selectReadyHotbarMaterial(gravel), "Zero-delay refill skipped the publication requirement");
+            player.inventory.main.set(13, sand.copy());
+            player.inventory.main.set(2, gravel.copy());
+            publishInventory(fixture, manager);
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(manager.selectReadyHotbarMaterial(gravel), "Full authoritative snapshot did not settle selected fallback");
+        } finally {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(previousDelay);
+        }
+    }
+
+    private static InventoryManager newInventoryManager() throws Exception {
+        Constructor<InventoryManager> constructor = InventoryManager.class.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        return constructor.newInstance();
+    }
+
+    private static void checkAuthoritativeRefillRecovery(Fixture fixture) throws Exception {
+        FixturePlayer player = fixture.player;
+        PlayerScreenHandler handler = player.playerScreenHandler;
+        InventoryManager manager = newInventoryManager();
+        int previousDelay = PrinterConfig.INVENTORY_DELAY.getIntegerValue();
+        try {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(10);
+            PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("3");
+            InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+            ItemStack stone = new ItemStack(Items.STONE, 8);
+            ItemStack dirt = new ItemStack(Items.DIRT);
+            ItemStack sand = new ItemStack(Items.SAND, 16);
+            ItemStack gravel = new ItemStack(Items.GRAVEL, 16);
+            fill(player, new ItemStack(Items.COBBLESTONE));
+            player.inventory.selectedSlot = 2;
+            player.inventory.main.set(2, stone.copy());
+            player.inventory.main.set(4, dirt.copy());
+            player.inventory.main.set(12, sand.copy());
+            player.inventory.main.set(13, gravel.copy());
+            int before = fixture.network.inventorySwaps;
+            int probes = fixture.network.inventoryReadbacks;
+            int fences = fixture.network.statisticsRequests;
+
+            check(!manager.select(sand) && fixture.network.inventorySwaps == before + 1,
+                    "Did not send the refill used for the timeout check");
+            advanceInventoryTicks(fixture, manager, 300);
+            check(!manager.select(gravel) && fixture.network.inventorySwaps == before + 1,
+                    "An unresolved refill allowed a second mutation");
+            check(fixture.network.inventoryReadbacks == probes && fixture.network.statisticsRequests == fences + 1,
+                    "Timeout sent a readback before an ordered server fence");
+            check(!manager.selectReadyHotbarMaterial(stone), "Unknown refill outcome released its old destination stack");
+            check(manager.selectReadyHotbarMaterial(dirt), "Unknown refill outcome blocked an unrelated slot");
+
+            // An authoritative publication can still settle the first mutation
+            // after its deadline. It must never cause a replay of that SWAP.
+            player.inventory.main.set(12, stone.copy());
+            player.inventory.main.set(2, sand.copy());
+            publishInventory(fixture, manager);
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(manager.selectReadyHotbarMaterial(sand) && fixture.network.inventorySwaps == before + 1
+                            && fixture.network.inventoryReadbacks == probes,
+                    "A late matching snapshot did not release the quarantined destination");
+
+            check(!manager.select(gravel) && fixture.network.inventorySwaps == before + 2,
+                    "Could not refill after the late authoritative snapshot");
+            // The intent matches at its destination, but the displaced stack
+            // was externally changed. Both endpoints must match for fast release.
+            player.inventory.main.set(13, sand.copyWithCount(15));
+            player.inventory.main.set(2, gravel.copy());
+            publishInventory(fixture, manager);
+            check(!manager.selectReadyHotbarMaterial(gravel), "A mismatched displaced stack was reported as a confirmed refill");
+            check(manager.selectReadyHotbarMaterial(dirt), "A mismatched snapshot blocked an unrelated slot");
+
+            ScreenHandler other = (ScreenHandler) fixture.unsafe.allocateInstance(PlayerScreenHandler.class);
+            set(ScreenHandler.class, other, "syncId", 9);
+            player.currentScreenHandler = other;
+            manager.onAuthoritativeInventory(other.syncId, handler.getRevision() + 1, handler.slots.size());
+            advanceInventoryTicks(fixture, manager, 30);
+            check(!manager.select(dirt) && !manager.canStartRefill() && fixture.network.statisticsRequests == fences + 2,
+                    "An open container allowed selection, refill, or a player-inventory readback");
+            player.currentScreenHandler = handler;
+            check(!manager.canStartRefill(), "A foreign container update completed the active refill");
+            set(ScreenHandler.class, handler, "revision", (handler.getRevision() + 0x4000) & 0x7fff);
+            advanceInventoryTicks(fixture, manager, 30);
+            check(fixture.network.inventorySwaps == before + 2 && fixture.network.inventoryReadbacks == probes
+                            && fixture.network.statisticsRequests == fences + 2,
+                    "Closing the container replayed the mutation or failed to order its readback");
+            int revisionBeforeProbe = handler.getRevision();
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(fixture.network.inventoryReadbacks == probes + 1 && fixture.network.statisticsRequests == fences + 3,
+                    "The first fence did not issue one readback followed by its own fence");
+            ClickSlotC2SPacket probe = fixture.network.latestReadback;
+            check(probe.getSyncId() == handler.syncId && probe.getSlot() == PlayerScreenHandler.HOTBAR_START + probe.getButton()
+                            && probe.getRevision() == (revisionBeforeProbe ^ 0x4000)
+                            && fixture.network.statisticsRequestsAtLatestReadback == fences + 2,
+                    "Readback would touch distinct slots, use the synchronized revision, or precede its first fence");
+            check(!manager.selectReadyHotbarMaterial(gravel), "The first fence released the slot without a new readback");
+            manager.onAuthoritativeInventory(handler.syncId, advanceRevision(handler), handler.slots.size() - 1);
+            check(!manager.selectReadyHotbarMaterial(gravel), "A short inventory update released the slot");
+            publishInventory(fixture, manager);
+            check(!manager.selectReadyHotbarMaterial(gravel), "A mismatched readback released the slot before its fence");
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(manager.selectReadyHotbarMaterial(gravel), "A fenced readback did not expose authoritative inventory");
+            check(!manager.canStartRefill(), "Readback recovery did not back off before a new mutation");
+            advanceInventoryTicks(fixture, manager, 30);
+
+            // The server silently refuses this click. A full readback shows
+            // the unchanged endpoints before the fence unlocks fresh planning.
+            check(!manager.select(sand) && fixture.network.inventorySwaps == before + 3,
+                    "Could not start a fresh refill after backoff");
+            advanceInventoryTicks(fixture, manager, 30);
+            manager.onInventoryReadbackBarrier(fixture.network);
+            publishInventory(fixture, manager);
+            check(!manager.selectReadyHotbarMaterial(gravel), "An unchanged readback released a silent refusal too early");
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(manager.selectReadyHotbarMaterial(gravel) && fixture.network.inventorySwaps == before + 3,
+                    "Recovering a silent refusal replayed the original click");
+            advanceInventoryTicks(fixture, manager, 30);
+
+            check(!manager.select(sand) && fixture.network.inventorySwaps == before + 4,
+                    "Did not reach a second silent request for the stale-snapshot check");
+            advanceInventoryTicks(fixture, manager, 30);
+            // This is a full snapshot, but it precedes the readback request.
+            publishInventory(fixture, manager);
+            manager.onInventoryReadbackBarrier(fixture.network);
+            manager.onInventoryReadbackBarrier(fixture.network);
+            check(!manager.selectReadyHotbarMaterial(gravel) && !manager.canStartRefill()
+                            && fixture.network.inventorySwaps == before + 4,
+                    "A snapshot preceding the readback released a still-ambiguous mutation");
+        } finally {
+            player.currentScreenHandler = handler;
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(previousDelay);
+        }
+    }
+
+    private static void checkGroupFences(Fixture fixture) throws Exception {
+        InventoryManager manager = newInventoryManager();
+        FixturePlayer player = fixture.player;
+        PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("2,3,4");
+        InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+        ItemStack dirt = new ItemStack(Items.DIRT, 8);
+        ItemStack bricks = new ItemStack(Items.BRICKS, 8);
+        ItemStack sand = new ItemStack(Items.SAND, 8);
+        ItemStack gravel = new ItemStack(Items.GRAVEL, 4);
+        fill(player, dirt);
+        player.inventory.main.set(9, bricks.copy());
+        player.inventory.main.set(10, sand.copy());
+        player.inventory.main.set(11, gravel.copy());
+        var first = new InventoryManager.Refill(9, 1);
+        var second = new InventoryManager.Refill(10, 2);
+        var third = new InventoryManager.Refill(11, 3);
+        check(!manager.startSwapGroup(player, List.of(first, new InventoryManager.Refill(9, 2)))
+                        && !manager.startSwapGroup(player, List.of(first, new InventoryManager.Refill(10, 1)))
+                        && fixture.network.inventorySwaps == 0, "An overlapping group partially moved inventory");
+        // A plain statistics screen opened before the printer request. Its reply must not
+        // unlock a group even when an earlier authoritative snapshot has the desired layout.
+        fixture.network.sendPacket(new ClientStatusC2SPacket(ClientStatusC2SPacket.Mode.REQUEST_STATS));
+        check(manager.startSwapGroup(player, List.of(first, second, third))
+                        && fixture.network.inventorySwaps == 3 && fixture.network.statisticsRequests == 2,
+                "A disjoint batch did not send all three clicks followed by one owned fence");
+        for (int source : new int[]{9, 10, 11}) player.inventory.main.set(source, dirt.copy());
+        player.inventory.main.set(1, bricks.copy());
+        player.inventory.main.set(2, sand.copy());
+        player.inventory.main.set(3, gravel.copy());
+        publishInventory(fixture, manager);
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(!manager.selectReadyHotbarMaterial(bricks) && !manager.selectReadyHotbarMaterial(sand)
+                        && !manager.selectReadyHotbarMaterial(gravel) && manager.selectReadyHotbarMaterial(dirt),
+                "A matching snapshot and someone else's stats reply released part of the group");
+        // Vanilla executes the real click after the earlier snapshot, restoring the old
+        // values of this pair. The other two pairs must stay reserved until the full refresh.
+        publishSlot(fixture, manager, 1, dirt.copy());
+        publishSlot(fixture, manager, 9, bricks.copy());
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(fixture.network.inventoryReadbacks == 1 && fixture.network.statisticsRequests == 3
+                        && !manager.selectReadyHotbarMaterial(sand), "An incomplete group skipped the fenced readback");
+        publishInventory(fixture, manager);
+        player.inventory.selectedSlot = 3;
+        check(player.inventory.dropSelectedItem(false).getCount() == 1, "Local drop did not change the reserved stack");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        advanceInventoryTicks(fixture, manager, 220);
+        check(fixture.network.inventoryReadbacks == 2 && fixture.network.statisticsRequests == 4
+                        && fixture.network.inventorySwaps == 3 && !manager.canStartRefill(),
+                "A changed readback never retried safely or retransmitted the material group");
+        publishInventory(fixture, manager);
+        advanceInventoryTicks(fixture, manager, 1200);
+        check(!manager.selectReadyHotbarMaterial(gravel) && !manager.canStartRefill()
+                        && fixture.network.inventoryReadbacks == 2 && fixture.network.inventorySwaps == 3,
+                "An unacknowledged retry released or retransmitted a pending group");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        advanceInventoryTicks(fixture, manager, 220);
+        check(manager.selectReadyHotbarMaterial(gravel) && manager.canStartRefill()
+                        && !manager.hasReadyNativeMaterial(bricks), "A fresh valid snapshot did not recover the actual inventory");
+
+        // No inventory mutation is needed to recount an exhausted stack. Drain all earlier
+        // uses first, then accept only a fresh full readback followed by its own ordered reply.
+        int priorReads = fixture.network.inventoryReadbacks;
+        check(manager.requestStockReadback(3) && manager.isReservedHotbar(player, 3)
+                        && !manager.requestStockReadback(2), "Stock recount did not reserve exactly one transaction");
+        publishInventory(fixture, manager);
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(fixture.network.inventoryReadbacks == priorReads + 1 && manager.isReservedHotbar(player, 3),
+                "A publication from before the stock probe released the slot");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        advanceInventoryTicks(fixture, manager, 220);
+        check(fixture.network.inventoryReadbacks == priorReads + 2 && manager.isReservedHotbar(player, 3),
+                "The stock readback accepted a stale snapshot or failed to retry");
+        publishInventory(fixture, manager);
+        check(!manager.selectReadyHotbarMaterial(gravel) && manager.selectReadyHotbarMaterial(sand),
+                "A stock readback exposed its slot early or blocked disjoint work");
+        manager.onInventoryReadbackBarrier(fixture.network);
+        check(manager.selectReadyHotbarMaterial(gravel) && fixture.network.inventorySwaps == 3,
+                "The stock readback did not settle without mutating inventory");
+        PrinterConfig.PRINTER_HOTBAR_SLOTS.setValueFromString("3");
+        InventoryManager.setHotbarSlots(PrinterConfig.PRINTER_HOTBAR_SLOTS);
+    }
+
+    private static void advanceInventoryTicks(Fixture fixture, InventoryManager manager, int ticks) {
+        for (int tick = 0; tick < ticks; tick++) {
+            fixture.player.age++;
+            manager.tick();
+        }
+    }
+
+    private static void checkRefillSessionChange(Fixture fixture) throws Exception {
+        FixturePlayer oldPlayer = fixture.player;
+        InventoryManager manager = newInventoryManager();
+        fill(oldPlayer, new ItemStack(Items.STONE));
+        oldPlayer.inventory.selectedSlot = 2;
+        oldPlayer.inventory.main.set(12, new ItemStack(Items.SAND));
+        int before = fixture.network.inventorySwaps;
+        check(!manager.select(new ItemStack(Items.SAND)) && fixture.network.inventorySwaps == before + 1,
+                "Did not reach an active refill in the old session");
+
+        Fixture replacement = createFixture();
+        set(MinecraftClient.class, null, "instance", fixture.client);
+        fixture.client.player = replacement.player;
+        fixture.client.interactionManager = replacement.interaction;
+        try {
+            replacement.player.inventory.main.set(2, new ItemStack(Items.DIRT));
+            replacement.player.inventory.main.set(12, new ItemStack(Items.GRAVEL));
+            manager.tick();
+            check(manager.selectReadyHotbarMaterial(new ItemStack(Items.DIRT)),
+                    "Prior session's refill quarantined the replacement player's hotbar");
+            check(!manager.select(new ItemStack(Items.GRAVEL)) && replacement.network.inventorySwaps == 1
+                            && fixture.network.inventorySwaps == before + 1,
+                    "A fresh refill used or was blocked by the old session's active request");
+            check(manager.tracksConnection(replacement.network) && !manager.tracksConnection(fixture.network),
+                    "The old session's packets remained eligible to confirm the new refill");
+        } finally {
+            fixture.client.player = oldPlayer;
+            fixture.client.interactionManager = fixture.interaction;
+        }
+    }
+
+    private static void checkRefillPlayerReplacement(Fixture fixture) throws Exception {
+        FixturePlayer oldPlayer = fixture.player;
+        FixtureNetwork connection = fixture.network;
+        InventoryManager manager = newInventoryManager();
+        ItemStack stone = new ItemStack(Items.STONE, 8);
+        ItemStack sand = new ItemStack(Items.SAND, 16);
+        ItemStack dirt = new ItemStack(Items.DIRT);
+        ItemStack gravel = new ItemStack(Items.GRAVEL);
+        fill(oldPlayer, new ItemStack(Items.COBBLESTONE));
+        oldPlayer.inventory.selectedSlot = 2;
+        oldPlayer.inventory.main.set(2, stone.copy());
+        oldPlayer.inventory.main.set(12, sand.copy());
+        int swaps = connection.inventorySwaps;
+        int probes = connection.inventoryReadbacks;
+        int fences = connection.statisticsRequests;
+        check(!manager.select(sand) && connection.inventorySwaps == swaps + 1,
+                "Did not send the refill before replacing the player on its connection");
+        publishSlot(fixture, manager, 12, stone.copy());
+
+        Fixture replacement = createFixture();
+        set(MinecraftClient.class, null, "instance", fixture.client);
+        set(ClientPlayerEntity.class, replacement.player, "networkHandler", connection);
+        set(ClientPlayerInteractionManager.class, replacement.interaction, "networkHandler", connection);
+        fixture.client.player = replacement.player;
+        fixture.client.interactionManager = replacement.interaction;
+        int previousDelay = PrinterConfig.INVENTORY_DELAY.getIntegerValue();
+        try {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(10);
+            replacement.player.inventory.selectedSlot = 2;
+            replacement.player.inventory.main.set(2, stone.copy());
+            replacement.player.inventory.main.set(4, dirt.copy());
+            replacement.player.inventory.main.set(12, stone.copy());
+            replacement.player.inventory.main.set(13, gravel.copy());
+            manager.onPrinterContextChanged();
+            check(manager.tracksConnection(connection) && !manager.selectReadyHotbarMaterial(stone),
+                    "Player replacement released the destination despite retaining the potentially active connection");
+            check(!manager.select(gravel) && connection.inventorySwaps == swaps + 1,
+                    "Player replacement allowed a second inventory mutation");
+
+            publishSlot(replacement, manager, 2, sand.copy());
+            check(!manager.selectReadyHotbarMaterial(sand), "Old source publication confirmed the replacement player's hotbar");
+            publishSlot(replacement, manager, 12, stone.copy());
+            check(!manager.selectReadyHotbarMaterial(sand) && manager.selectReadyHotbarMaterial(dirt),
+                    "Player replacement fast-confirmed affected material or blocked an unrelated slot");
+
+            advanceInventoryTicks(replacement, manager, 30);
+            check(connection.statisticsRequests == fences + 1 && connection.inventoryReadbacks == probes,
+                    "Recovery did not order a new-player inventory refresh");
+            PlayerScreenHandler handler = replacement.player.playerScreenHandler;
+            int revision = handler.getRevision();
+            manager.onInventoryReadbackBarrier(connection);
+            check(connection.inventoryReadbacks == probes + 1 && connection.statisticsRequests == fences + 2
+                            && connection.latestReadback.getRevision() == (revision ^ 0x4000),
+                    "Readback did not use the replacement player's handler revision");
+            publishInventory(replacement, manager);
+            check(!manager.selectReadyHotbarMaterial(sand), "Rebound refill was released before the final fence");
+            manager.onInventoryReadbackBarrier(connection);
+            check(manager.selectReadyHotbarMaterial(sand) && connection.inventorySwaps == swaps + 1,
+                    "Fenced replacement-player inventory did not recover without another SWAP");
+
+            checkRefillInterruptedReadback(connection, replacement, manager, gravel, sand);
+        } finally {
+            PrinterConfig.INVENTORY_DELAY.setIntegerValue(previousDelay);
+            fixture.client.player = oldPlayer;
+            fixture.client.interactionManager = fixture.interaction;
+        }
+    }
+
+    private static void checkRefillInterruptedReadback(FixtureNetwork connection, Fixture replacement,
+                                                        InventoryManager manager, ItemStack gravel, ItemStack sand)
+            throws Exception {
+        FixturePlayer player = replacement.player;
+        PlayerScreenHandler handler = player.playerScreenHandler;
+        int swaps = connection.inventorySwaps;
+        int probes = connection.inventoryReadbacks;
+        int fences = connection.statisticsRequests;
+        check(!manager.select(gravel) && connection.inventorySwaps == swaps + 1,
+                "Did not send the refill for the readback-interruption check");
+        advanceInventoryTicks(replacement, manager, 30);
+        manager.onInventoryReadbackBarrier(connection);
+        player.inventory.main.set(13, sand.copy());
+        player.inventory.main.set(2, gravel.copy());
+        publishInventory(replacement, manager);
+
+        ScreenHandler other = (ScreenHandler) replacement.unsafe.allocateInstance(PlayerScreenHandler.class);
+        player.currentScreenHandler = other;
+        manager.tick();
+        player.currentScreenHandler = handler;
+        manager.onInventoryReadbackBarrier(connection);
+        check(!manager.selectReadyHotbarMaterial(gravel) && connection.inventorySwaps == swaps + 1,
+                "Closing a container allowed an interrupted readback to release its destination");
+
+        advanceInventoryTicks(replacement, manager, 30);
+        check(connection.inventoryReadbacks == probes + 2 && connection.statisticsRequests == fences + 3,
+                "Interrupted refresh did not restart with an ordered readback");
+        publishInventory(replacement, manager);
+        manager.onInventoryReadbackBarrier(connection);
+        check(manager.selectReadyHotbarMaterial(gravel) && connection.inventorySwaps == swaps + 1,
+                "Restarted readback did not recover without replaying the refill");
+    }
+
+    private static void publishSlot(Fixture fixture, InventoryManager manager, int inventorySlot, ItemStack stack)
+            throws Exception {
+        PlayerScreenHandler handler = fixture.player.playerScreenHandler;
+        int revision = advanceRevision(handler);
+        fixture.player.inventory.main.set(inventorySlot, stack);
+        int screenSlot = inventorySlot < 9 ? PlayerScreenHandler.HOTBAR_START + inventorySlot : inventorySlot;
+        manager.onAuthoritativeSlot(handler.syncId, revision, screenSlot);
+    }
+
+    private static void publishInventory(Fixture fixture, InventoryManager manager) throws Exception {
+        PlayerScreenHandler handler = fixture.player.playerScreenHandler;
+        manager.onAuthoritativeInventory(handler.syncId, advanceRevision(handler), handler.slots.size());
+    }
+
+    private static int advanceRevision(PlayerScreenHandler handler) throws Exception {
+        int revision = (handler.getRevision() + 1) & 32767;
+        set(ScreenHandler.class, handler, "revision", revision);
+        return revision;
     }
 
     private static void fill(FixturePlayer player, ItemStack stack) {
@@ -937,30 +1381,49 @@ public final class InteractionRegressionChecks {
         private List<PlayerInteractItemC2SPacket> uses;
         private List<PlayerInteractBlockC2SPacket> blockPackets;
         private int handSwaps;
+        private int inventorySwaps;
+        private int inventoryReadbacks;
+        private int statisticsRequests;
+        private int statisticsRequestsAtLatestReadback;
+        private ClickSlotC2SPacket latestSwap;
+        private ClickSlotC2SPacket latestReadback;
         @Override public void sendPacket(Packet<?> packet) {
             if (packet instanceof PlayerInteractItemC2SPacket use) uses.add(use);
             if (packet instanceof PlayerInteractBlockC2SPacket use && blockPackets != null) blockPackets.add(use);
             if (packet instanceof PlayerActionC2SPacket action
                     && action.getAction() == PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND) handSwaps++;
+            if (packet instanceof ClickSlotC2SPacket swap) {
+                boolean refill = swap.getSlot() >= 9 && swap.getSlot() < 36;
+                boolean sameSlot = swap.getSlot() == PlayerScreenHandler.HOTBAR_START + swap.getButton();
+                check(swap.getActionType() == SlotActionType.SWAP && (refill || sameSlot),
+                        "Printer sent an unexpected inventory action");
+                check(swap.getModifiedStacks().isEmpty() && swap.getStack().isEmpty(),
+                        "Printer sent predicted inventory state with its authoritative refill request");
+                if (refill) {
+                    inventorySwaps++;
+                    latestSwap = swap;
+                } else {
+                    inventoryReadbacks++;
+                    latestReadback = swap;
+                    statisticsRequestsAtLatestReadback = statisticsRequests;
+                }
+            }
+            if (packet instanceof ClientStatusC2SPacket status && status.getMode() == ClientStatusC2SPacket.Mode.REQUEST_STATS) {
+                InventoryFenceOrder.get(this).sent(status);
+                statisticsRequests++;
+            }
         }
     }
 
     private static final class FixtureInteraction extends ClientPlayerInteractionManager {
-        private int swaps;
         private int creativeWrites;
         private int itemUses;
         private int blockUses;
         private boolean rejectItemUse;
         private boolean throwOnUse;
-        private SlotActionType lastType;
         private FixtureInteraction() { super(null, null); }
         @Override public void clickSlot(int syncId, int slotId, int button, SlotActionType type, PlayerEntity player) {
-            check(type == SlotActionType.SWAP && slotId >= 9 && slotId < 36, "Unexpected click action");
-            swaps++;
-            lastType = type;
-            ItemStack displaced = player.getInventory().main.get(button);
-            player.getInventory().main.set(button, player.getInventory().main.get(slotId));
-            player.getInventory().main.set(slotId, displaced);
+            throw new AssertionError("Printer predicted an automated swap in the local inventory");
         }
         @Override public void clickCreativeStack(ItemStack stack, int slotId) { creativeWrites++; }
         @Override public ActionResult interactItem(PlayerEntity player, Hand hand) {

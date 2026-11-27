@@ -26,10 +26,24 @@ public final class NativeRegressionChecks {
     public static void main(String[] args) throws Exception {
         SharedConstants.createGameVersion();
         Bootstrap.initialize();
+        if (java.util.Arrays.asList(args).contains("--attachments")) {
+            checkAttachments();
+            return;
+        }
+        if (java.util.Arrays.asList(args).contains("--sign-writes")) {
+            SignWriteChecks.run();
+            return;
+        }
+        if (java.util.Arrays.asList(args).contains("--inventory-latency")) {
+            InventoryLatencyBenchmark.run(java.util.Arrays.asList(args).contains("--baseline-tick-order"),
+                    !java.util.Arrays.asList(args).contains("--timed-refill"));
+            return;
+        }
         if (java.util.Arrays.asList(args).contains("--state-interactions")) {
             int interactionChecks = InteractionRegressionChecks.run();
             int movingChecks = MovingStateRegressionChecks.run();
             int sneakChecks = LegacySneakRegressionChecks.run();
+            InventorySchedulingChecks.run();
             System.out.println("Focused state interaction checks passed: " + movingChecks
                     + " moving-state assertions; " + sneakChecks + " legacy-sneak assertions; "
                     + interactionChecks + " existing interaction assertions.");
@@ -44,9 +58,12 @@ public final class NativeRegressionChecks {
         checkInvalidBudgets();
         checkNanoTimeWrap();
         checkLegacyRotationHandoff();
+        checkAttachments();
         int placementChecks = NativePlacementContextChecks.run();
         int solverChecks = NativePlacementSolverChecks.run();
         int interactionChecks = InteractionRegressionChecks.run();
+        InventorySchedulingChecks.run();
+        SignWriteChecks.run();
         int schematicChecks = SchematicConversionRegressionChecks.run();
         int movingChecks = MovingStateRegressionChecks.run();
         int sneakChecks = LegacySneakRegressionChecks.run();
@@ -55,6 +72,13 @@ public final class NativeRegressionChecks {
                 + solverChecks + " full-solver assertions; " + interactionChecks + " state/inventory/interaction assertions; "
                 + schematicChecks + " schematic-conversion assertions; " + movingChecks + " moving-state assertions; "
                 + sneakChecks + " legacy-sneak assertions.");
+    }
+
+    private static void checkAttachments() throws Exception {
+        NativePacketLookChecks.run();
+        NativeMountSolverChecks.run();
+        PendingMountChecks.run();
+        System.out.println("Native attachment checks passed.");
     }
 
     private static void checkLatticeAgainstVanilla() throws Exception {

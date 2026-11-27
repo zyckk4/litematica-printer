@@ -24,7 +24,7 @@ def git(*args):
 def public_path(relative):
     path = Path(relative)
     if relative in {
-        ".gitattributes", ".gitignore", "README.md", "LICENSE.md", "build.gradle.kts",
+        ".gitattributes", ".gitignore", "AGENTS.md", "README.md", "LICENSE.md", "build.gradle.kts",
         "gradle.properties", "gradlew", "gradlew.bat", "settings.gradle",
         "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties",
         ".github/workflows/build.yml", "scripts/prepare_release.py",

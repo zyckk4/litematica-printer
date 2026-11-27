@@ -39,6 +39,11 @@ public final class NativeRegressionLauncher {
             requireInjected(loader, "net.minecraft.entity.Entity", "printer$movementSpeed");
             requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$blockUpdate");
             requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$correction");
+            requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$inventoryReadbackFence");
+            requireInjected(loader, "net.minecraft.network.ClientConnection", "printer$recordStatisticsWrite");
+            requireInjected(loader, "net.minecraft.network.ClientConnection", "printer$recordQueuedLook");
+            requireInjected(loader, "net.minecraft.client.network.ClientPlayerEntity", "printer$prepareMovementLook");
+            requireInjected(loader, "net.minecraft.client.network.ClientPlayNetworkHandler", "printer$acknowledgeBlockActions");
             requireInjected(loader, "fi.dy.masa.litematica.config.Configs", "loadFromFilePost");
             requireInjected(loader, "fi.dy.masa.litematica.gui.GuiConfigs", "moreOptions");
             requireInjected(loader, "fi.dy.masa.litematica.event.InputHandler", "moreHotkeys");

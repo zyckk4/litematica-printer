@@ -13,6 +13,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.state.property.Properties;
 import net.minecraft.state.property.Property;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
 import java.util.Optional;
@@ -71,6 +72,12 @@ abstract public class Guide extends BlockHelperImpl {
     abstract public @NotNull List<Action> execute(ClientPlayerEntity player);
 
     abstract protected @NotNull List<ItemStack> getRequiredItems();
+
+    @Nullable
+    public ItemStack requiredMaterial(ClientPlayerEntity player) {
+        List<ItemStack> materials = getRequiredItem(player);
+        return materials.isEmpty() ? null : materials.getFirst();
+    }
 
     /**
      * Returns the first required item that player has access to,
