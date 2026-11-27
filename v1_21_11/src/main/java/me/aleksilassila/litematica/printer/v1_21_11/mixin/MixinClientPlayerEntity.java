@@ -26,6 +26,11 @@ public class MixinClientPlayerEntity {
         return MovementHandler.declaredInput(original);
     }
 
+    @Inject(method = "sendMovementPackets", at = @At("HEAD"))
+    private void printer$prepareMovementLook(CallbackInfo ci) {
+        MovementHandler.prepareMovementLook((ClientPlayerEntity) (Object) this);
+    }
+
     @ModifyExpressionValue(method = "sendMovementPackets", at = @At(value = "INVOKE",
             target = "Lnet/minecraft/client/network/ClientPlayerEntity;getYaw()F"))
     private float printer$movementYaw(float original) {

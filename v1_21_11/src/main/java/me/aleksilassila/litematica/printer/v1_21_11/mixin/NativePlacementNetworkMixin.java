@@ -11,6 +11,7 @@ import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.InventoryS2CPacket;
+import net.minecraft.network.packet.s2c.play.PlayerActionResponseS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
 import net.minecraft.network.packet.s2c.play.ScreenHandlerSlotUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.StatisticsS2CPacket;
@@ -77,6 +78,11 @@ public class NativePlacementNetworkMixin implements InventoryFenceOrder.Access {
     @Inject(method = "onBlockUpdate", at = @At("TAIL"))
     private void printer$blockUpdate(BlockUpdateS2CPacket packet, CallbackInfo ci) {
         Printer.confirmNativePlacement(packet.getPos(), packet.getState());
+    }
+
+    @Inject(method = "onPlayerActionResponse", at = @At("TAIL"))
+    private void printer$acknowledgeBlockActions(PlayerActionResponseS2CPacket packet, CallbackInfo ci) {
+        if (MinecraftClient.getInstance().getNetworkHandler() == (Object) this) Printer.acknowledgeBlockActions(packet.sequence());
     }
 
     @Inject(method = "onChunkDeltaUpdate", at = @At("TAIL"))

@@ -1,10 +1,10 @@
 # Litematica Printer — Minecraft 1.21.11
 
-A Fabric printer extension for Litematica, optimized specifically for the current
-2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
-native placement and movement handling, without a protocol downgrade.
+A Fabric printer extension for Litematica, optimized for **2b2t’s Minecraft
+1.21.4 Folia server**. This branch runs on the **Minecraft 1.21.11 Fabric
+client** and uses its native placement and movement packets.
 
-Version: **3.4.9**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.10**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -32,7 +32,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.9-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.10-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -146,6 +146,12 @@ Torches, soul torches and redstone torches preserve the schematic's floor or
 wall attachment, including when `printerIgnoreRotation` is enabled. Both native
 and legacy placement simulate the actual torch item and recheck the required
 support before sending; remove previously misplaced torches manually to reprint.
+Native placement prefers the schematic's support face for ordinary signs. This
+keeps a nearby stone, door or another sign placed in the same batch from taking
+over as the support. A placement that needs a new support can proceed once that
+support is visible. Wall attachments keep their mounting side even with
+`printerIgnoreRotation` enabled. On Folia 1.21.4 an accepted turn updates head
+rotation immediately, so hanging signs can use that turn in the same tick.
 Redstone-controlled states follow the surrounding circuit. When the server opens
 a sign face for editing, the printer captures its four schematic lines and
 suppresses the editor. Each sign waits independently for `printerMinSignDelayMs`
@@ -158,14 +164,15 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.9
+## Remaining issues in 3.4.10
 
 | Area | Trigger and observed code behavior |
 | --- | --- |
 | Native solver | With `printerNativeMoving` enabled and both `printerNativeOmni` and `printerGrimRotate` disabled, ordinary blocks can be skipped even with solid support. |
 | Content and transformations | The printer can start with the empty/basic block, but does not insert books, bottles or records; fill cauldrons; add candles to cakes; charge respawn anchors; fill composters; or recreate cake bites and honey levels. Restore these separately. Bamboo growth, berries and hydration also follow normal game rules. |
 | Existing light state | An extinguished campfire is not automatically relit, and a lit candle is not automatically extinguished. The opposite operations are supported while stationary. |
-| Vine attachments | Ordinary vines can accept a different supported face from the schematic and do not repair existing faces. Multiface blocks use the separate staged-face path. |
+| Vine attachments | Native printing can add missing vine faces. A vine already attached to an extra side needs manual removal. |
+| Pale moss carpet | The item places the base. The game grows upper fronds, so the printer skips an upper frond that cannot be placed directly. |
 | Strict raycast and slabs | With both `printerRaycast` and `printerRaycastStrictBlockHit` enabled, completing a bottom slab from directly above can fail because hit samples use full-block faces. |
 | Keys and camera | Default `printerPickBlock` can consume middle click on a miss. In legacy mode FreeLook can stay active after printing stops. |
 | Airplace and state matching | The legacy airplace switch, range, airplace-only mode and inactivity delay do not govern native omni placement. Legacy airplace can reuse a cached context with `printerNoPlacementCache` enabled. The explicit `printerAllowNoneExactStates` check is limited to the legacy glow lichen guide. |

@@ -210,17 +210,52 @@ public class MovementHandler {
         movementSent = true;
     }
 
+    private static NativePacketLook.Angles queuedLook(ClientPlayerEntity player) {
+        return player != null && player.networkHandler != null
+                && player.networkHandler.getConnection() instanceof NativePacketLook connection
+                ? connection.printer$lastLook() : null;
+    }
+
+    /** Use the normal movement flush to establish one angle for both accepted and rejected item uses. */
+    public static void prepareMovementLook(ClientPlayerEntity player) {
+        boolean reservedTurn = hasRotation() && inputValidated;
+        var look = queuedLook(player);
+        if (look == null) return;
+        MixinAccessorClientPlayerEntity accessor = (MixinAccessorClientPlayerEntity) player;
+        if (look.uncertain()) {
+            if (reservedTurn || Printer.canRunActions(mc(), player)) {
+                // Make vanilla include the requested look even if it equals the last movement's angles.
+                accessor.setLastYaw(serverYaw(player.getYaw()) + 180.0F);
+            }
+        } else if (reservedTurn) {
+            accessor.setLastYaw(look.yaw());
+            accessor.setLastPitch(look.pitch());
+        }
+    }
+
+    public static boolean placementLookKnown(ClientPlayerEntity player) {
+        var look = queuedLook(player);
+        return look == null || !look.uncertain();
+    }
+
     public static boolean sentRotationMatches(float yaw, float pitch) {
-        return movementSent && Math.abs(MathHelper.wrapDegrees(sentYaw - yaw)) < 0.001F
-                && Math.abs(sentPitch - pitch) < 0.001F;
+        if (!movementSent) return false;
+        var look = queuedLook(mc().player);
+        return (look == null || !look.uncertain())
+                && Math.abs(MathHelper.wrapDegrees((look == null ? sentYaw : look.yaw()) - yaw)) < 0.001F
+                && Math.abs((look == null ? sentPitch : look.pitch()) - pitch) < 0.001F;
     }
 
     public static float sentYaw(float fallback) {
-        return movementSent ? sentYaw : fallback;
+        if (!movementSent) return fallback;
+        var look = queuedLook(mc().player);
+        return look == null ? sentYaw : look.yaw();
     }
 
     public static float sentPitch(float fallback) {
-        return movementSent ? sentPitch : fallback;
+        if (!movementSent) return fallback;
+        var look = queuedLook(mc().player);
+        return look == null ? sentPitch : look.pitch();
     }
 
     public void onGameTick() {

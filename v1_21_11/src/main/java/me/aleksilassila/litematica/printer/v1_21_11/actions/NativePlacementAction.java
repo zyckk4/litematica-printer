@@ -45,18 +45,20 @@ public final class NativePlacementAction extends Action {
         if (!Printer.inventoryManager.canUseSelectedSlot(player)) return false;
         ItemStack held = player.getMainHandStack();
         if (!ItemStack.areItemsAndComponentsEqual(held, stack)) return false;
+        if (!MovementHandler.placementLookKnown(player)) return false;
         if (!solution.anyRotation() && !MovementHandler.sentRotationMatches(solution.yaw(), solution.pitch())) return false;
         double reach = Math.min(LitematicaMixinMod.PRINTING_RANGE.getDoubleValue(), player.getBlockInteractionRange());
         NativePlacementSolver.Solution checked = NativePlacementSolver.revalidate(target, desired, held, solution,
                 reach, MovementHandler.sentYaw(player.getYaw()), MovementHandler.sentPitch(player.getPitch()));
-        if (checked == null || !Printer.tryAcquirePlacementPacket()) return false;
+        if (checked == null || Printer.dependsOnPendingBlock(target, desired, held, checked.hit())
+                || !Printer.tryAcquirePlacementPacket()) return false;
 
         boolean swap = checked.airPlace() && PrinterConfig.PRINTER_NATIVE_GRIM_AIRPLACE.getBooleanValue();
         Hand hand = swap ? Hand.OFF_HAND : Hand.MAIN_HAND;
         if (swap) swapHands(client);
         try {
             client.interactionManager.sendSequencedPacket(client.world, sequence -> {
-                Printer.trackPlacement(target, desired, stack, sequence);
+                Printer.trackPlacement(target, checked.predicted(), stack, sequence);
                 return new PlayerInteractBlockC2SPacket(hand, checked.hit(), sequence);
             });
         } finally {

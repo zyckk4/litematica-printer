@@ -19,19 +19,30 @@ import me.aleksilassila.litematica.printer.v1_21_11.actions.NativePlacementActio
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.block.AbstractRailBlock;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.block.FluidBlock;
 import net.minecraft.block.ObserverBlock;
+import net.minecraft.block.PaleMossCarpetBlock;
+import net.minecraft.block.PitcherCropBlock;
+import net.minecraft.block.TallPlantBlock;
+import net.minecraft.block.enums.BedPart;
+import net.minecraft.block.enums.DoubleBlockHalf;
+import net.minecraft.block.enums.WallShape;
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.player.PlayerAbilities;
 import net.minecraft.item.ItemStack;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.MultifaceBlock;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.item.BlockItem;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec2f;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.BlockView;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
@@ -62,6 +73,9 @@ public class Printer {
     public static int inactivityCounter = 0;
     static final LinkedList<BlockTimeout> blockPosTimeout = new LinkedList<>();
     private static final Map<BlockPos, PendingPlacement> pendingPlacements = new HashMap<>();
+    // One BlockItem click may publish several cells. Each cell's world update arrives independently.
+    private static final Map<BlockPos, BlockChange> pendingBlockChanges = new HashMap<>();
+    private static int acknowledgedSequence = -1;
     private static final Map<Integer, SlotStock> pendingStock = new HashMap<>();
     private static Object predictionWorld;
     private static final PlacementRateLimiter placementRate = new PlacementRateLimiter();
@@ -72,6 +86,8 @@ public class Printer {
     public Printer(@NotNull MinecraftClient client, @NotNull ClientPlayerEntity player) {
         this.player = player;
         pendingPlacements.clear();
+        pendingBlockChanges.clear();
+        acknowledgedSequence = -1;
         resetStock();
         blockPosTimeout.clear();
         placementRate.reset();
@@ -159,7 +175,7 @@ public class Printer {
 
         List<BlockPos> positions = getReachablePositions();
 
-        positions = positions.stream().filter(pos -> !pendingPlacements.containsKey(pos)
+        positions = positions.stream().filter(pos -> !hasPendingPlacement(pos)
                 && blockPosTimeout.stream().noneMatch(entry -> entry.pos.equals(pos))).toList();
 
         boolean moving = player.input.getMovementInput().lengthSquared() > 0.0001F
@@ -190,7 +206,7 @@ public class Printer {
             BlockPos position = positions.get((guideStart + index) % positions.size());
             SchematicBlockState state = new SchematicBlockState(player.getEntityWorld(), worldSchematic, position);
             if (state.targetState.equals(state.currentState) || state.targetState.isAir()) continue;
-            if (pendingPlacements.containsKey(position)) continue;
+            if (hasPendingPlacement(position)) continue;
             if (moving && nativeEnabled) {
                 ItemStack material = MovingPrinterAction.requiredMaterial(state, player);
                 if (material == null) continue;
@@ -328,7 +344,7 @@ public class Printer {
             if (target.state().getBlock() instanceof ChestBlock && chestNeighbors.contains(target.pos())) continue;
             BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
             NativePlacementSolver.Solution solution = solveNative(target, desired, moving, batchSolution);
-            if (solution == null) continue;
+            if (solution == null || dependsOnPendingBlock(target.pos(), desired, target.stack(), solution.hit())) continue;
             if (batchSolution == null) {
                 if (!inventoryManager.selectReadyNativeMaterial(target.stack()) || !prepareNativeRotation(solution)) continue;
                 batchSolution = solution;
@@ -393,7 +409,7 @@ public class Printer {
     }
 
     private void addNativePlacement(NativeTarget target, BlockState desired, NativePlacementSolver.Solution solution) {
-        BlockState actionTarget = desired.getBlock() instanceof MultifaceBlock ? solution.predicted() : desired;
+        BlockState actionTarget = NativeAttachment.hasFaces(desired) ? solution.predicted() : desired;
         nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution, true));
     }
 
@@ -608,6 +624,20 @@ public class Printer {
         int waitTicks = MathHelper.clamp((latency * 2 + 750) / 50, 15, 60);
         PendingPlacement pending = new PendingPlacement(desired, stack.copyWithCount(1), sequence, waitTicks);
         pendingPlacements.put(pos.toImmutable(), pending);
+        if (sequence >= 0 && stack.getItem() instanceof BlockItem) {
+            pendingBlockChanges.put(pos.toImmutable(), new BlockChange(desired, sequence, waitTicks, false));
+            if (desired.getBlock() instanceof BedBlock && desired.get(BedBlock.PART) == BedPart.FOOT) {
+                pendingBlockChanges.put(pos.offset(desired.get(BedBlock.FACING)),
+                        new BlockChange(desired.with(BedBlock.PART, BedPart.HEAD), sequence, waitTicks, true));
+            } else if ((desired.getBlock() instanceof DoorBlock || (desired.getBlock() instanceof TallPlantBlock
+                    && !(desired.getBlock() instanceof PitcherCropBlock))) && desired.get(DoorBlock.HALF) == DoubleBlockHalf.LOWER) {
+                pendingBlockChanges.put(pos.up(), new BlockChange(desired.with(DoorBlock.HALF, DoubleBlockHalf.UPPER), sequence, waitTicks, true));
+            } else if (desired.getBlock() instanceof PaleMossCarpetBlock && desired.get(PaleMossCarpetBlock.BOTTOM)
+                    && PaleMossCarpetBlock.WALL_SHAPE_PROPERTIES_BY_DIRECTION.values().stream().anyMatch(side -> desired.get(side) != WallShape.NONE)) {
+                // The server randomly chooses which fronds to grow above the base.
+                pendingBlockChanges.put(pos.up(), new BlockChange(null, sequence, waitTicks, true));
+            }
+        }
         if (sequence >= 0 && stack.getItem() instanceof net.minecraft.item.BlockItem && client.player != null
                 && !client.player.getAbilities().creativeMode) {
             int slot = client.player.getInventory().getSelectedSlot();
@@ -622,7 +652,57 @@ public class Printer {
     }
 
     public static boolean hasPendingPlacement(BlockPos pos) {
-        return pendingPlacements.containsKey(pos);
+        BlockChange change = pendingBlockChanges.get(pos);
+        return pendingPlacements.containsKey(pos)
+                || (change != null && change.companion && !change.matched && change.ticks > 0);
+    }
+
+    private static boolean mayChange(BlockPos pos) {
+        return pendingBlockChanges.containsKey(pos) || pendingPlacements.containsKey(pos);
+    }
+
+    /** Called with the revalidated wire hit immediately before spending a placement packet. */
+    public static boolean dependsOnPendingBlock(BlockPos target, BlockState desired, ItemStack stack, BlockHitResult hit) {
+        if (!NativeAttachment.isSensitive(desired) || (pendingBlockChanges.isEmpty() && pendingPlacements.isEmpty())) return false;
+        BlockPos clicked = hit.getBlockPos();
+        if (mayChange(target) || mayChange(clicked)) return true;
+        var client = MinecraftClient.getInstance();
+        if (PrinterConfig.RAYCAST.getBooleanValue() && Boolean.TRUE.equals(BlockView.raycast(
+                client.player.getEyePos(), hit.getPos(), clicked,
+                (anchor, pos) -> !pos.equals(anchor) && mayChange(pos) ? Boolean.TRUE : null, anchor -> Boolean.FALSE))) {
+            return true;
+        }
+        Direction face = NativeAttachment.preferredFace(desired);
+        // Moving the clicked support to the front of vanilla's candidate order fixes the mount.
+        // revalidate() already checked that the held item actually produces the requested state on it.
+        boolean fixed = face != null && face == hit.getSide() && clicked.offset(face).equals(target)
+                && client.world.getBlockState(target).isAir() && !client.world.getBlockState(clicked).isReplaceable()
+                && !stack.contains(DataComponentTypes.BLOCK_STATE);
+        if (fixed) return false;
+        for (Direction side : Direction.values()) {
+            if (NativeAttachment.readsNeighbor(desired, side) && mayChange(target.offset(side))) return true;
+        }
+        return false;
+    }
+
+    public static void acknowledgeBlockActions(int sequence) {
+        acknowledgedSequence = Math.max(acknowledgedSequence, sequence);
+        pendingBlockChanges.values().removeIf(change -> change.sequence <= acknowledgedSequence && (change.matched || change.ticks <= 0));
+    }
+
+    private static final class BlockChange {
+        @Nullable final BlockState predicted;
+        final int sequence;
+        final boolean companion;
+        int ticks;
+        boolean matched;
+
+        BlockChange(@Nullable BlockState predicted, int sequence, int ticks, boolean companion) {
+            this.predicted = predicted;
+            this.sequence = sequence;
+            this.ticks = ticks;
+            this.companion = companion;
+        }
     }
 
     public static int pendingSlotCount(int slot, ItemStack held) {
@@ -666,6 +746,11 @@ public class Printer {
 
     /** Invoked on the client thread after vanilla applies a block update. */
     public static void confirmNativePlacement(BlockPos pos, BlockState actual) {
+        BlockChange change = pendingBlockChanges.get(pos);
+        if (change != null) {
+            if (change.sequence <= acknowledgedSequence) pendingBlockChanges.remove(pos);
+            else change.matched = actual.equals(change.predicted);
+        }
         PendingPlacement pending = pendingPlacements.get(pos);
         if (pending != null && pending.stack.isEmpty() && actual.isOf(pending.desired.getBlock())) {
             var property = MovingPrinterAction.tuningProperty(pending.desired);
@@ -694,6 +779,8 @@ public class Printer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (predictionWorld != client.world) {
             pendingPlacements.clear();
+            pendingBlockChanges.clear();
+            acknowledgedSequence = -1;
             resetStock();
             blockPosTimeout.clear();
             placementRate.reset();
@@ -701,6 +788,10 @@ public class Printer {
             predictionWorld = client.world;
         }
         pendingPlacements.entrySet().removeIf(entry -> --entry.getValue().ticks <= 0);
+        pendingBlockChanges.values().removeIf(change -> {
+            if (change.ticks > 0) change.ticks--;
+            return change.ticks == 0 && change.sequence <= acknowledgedSequence;
+        });
         if (client.player != null) {
             for (var entry : pendingStock.entrySet()) {
                 if (entry.getValue().uses.stream().anyMatch(use -> client.player.age - use.stockCheckTick >= 0)) {
