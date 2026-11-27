@@ -395,7 +395,7 @@ public final class NativePlacementSolver {
                 for (Direction face : Direction.values()) {
                     Vec3d sample = center.add(face.getOffsetX() * box.getLengthX() / 2,
                             face.getOffsetY() * box.getLengthY() / 2, face.getOffsetZ() * box.getLengthZ() / 2);
-                    addHit(result, target, eye, target, face, sample, false, reach);
+                    if (!hasOutlinePoint(result, face, sample)) addHit(result, target, eye, target, face, sample, false, reach);
                 }
             }
             return result;
@@ -432,21 +432,35 @@ public final class NativePlacementSolver {
         // near edges without requiring the face centre to be inside reach.
         double eyeU = face.getAxis() == Direction.Axis.X ? eye.z - block.getZ() : eye.x - block.getX();
         double eyeV = face.getAxis() == Direction.Axis.Y ? eye.z - block.getZ() : eye.y - block.getY();
-        addHit(hits, target, eye, block, face, offset(center, face,
-                MathHelper.clamp(eyeU, 0.05, 0.95) - 0.5, MathHelper.clamp(eyeV, 0.05, 0.95) - 0.5), air, reach);
+        Vec3d nearest = offset(center, face, MathHelper.clamp(eyeU, 0.05, 0.95) - 0.5,
+                MathHelper.clamp(eyeV, 0.05, 0.95) - 0.5);
+        boolean addedNearest = addHit(hits, target, eye, block, face, nearest, air, reach);
+        // This block face is enumerated once. Only the eye projection can
+        // coincide with one of its distinct grid points.
         for (double u : SAMPLES) {
-            for (double v : SAMPLES) addHit(hits, target, eye, block, face, offset(center, face, u - 0.5, v - 0.5), air, reach);
+            for (double v : SAMPLES) {
+                Vec3d sample = offset(center, face, u - 0.5, v - 0.5);
+                if (!addedNearest || nearest.squaredDistanceTo(sample) >= 1.0E-12) {
+                    addHit(hits, target, eye, block, face, sample, air, reach);
+                }
+            }
         }
     }
 
-    private static void addHit(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block, Direction face,
-                                Vec3d sample, boolean air, double reach) {
-        BlockHitResult hit = new BlockHitResult(sample, face, block, false);
-        for (HitCandidate existing : hits) {
-            if (existing.hit().getBlockPos().equals(block) && existing.hit().getSide() == face
-                    && existing.hit().getPos().squaredDistanceTo(sample) < 1.0E-12) return;
+    // All outline boxes here belong to one target. Their faces can overlap.
+    private static boolean hasOutlinePoint(List<HitCandidate> hits, Direction face, Vec3d sample) {
+        for (HitCandidate candidate : hits) {
+            if (candidate.hit().getSide() == face && candidate.hit().getPos().squaredDistanceTo(sample) < 1.0E-12) return true;
         }
-        if (validHit(target, eye, hit, reach)) hits.add(new HitCandidate(hit, air));
+        return false;
+    }
+
+    private static boolean addHit(List<HitCandidate> hits, BlockPos target, Vec3d eye, BlockPos block, Direction face,
+                                  Vec3d sample, boolean air, double reach) {
+        BlockHitResult hit = new BlockHitResult(sample, face, block, false);
+        if (!validHit(target, eye, hit, reach)) return false;
+        hits.add(new HitCandidate(hit, air));
+        return true;
     }
 
     private static boolean validHit(BlockPos target, Vec3d eye, BlockHitResult hit, double reach) {

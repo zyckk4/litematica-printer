@@ -6,15 +6,18 @@ import me.aleksilassila.litematica.printer.v1_21_11.NativeHeadRotation;
 import me.aleksilassila.litematica.printer.v1_21_11.NativePlacementSolver;
 import me.aleksilassila.litematica.printer.v1_21_11.Printer;
 import me.aleksilassila.litematica.printer.v1_21_11.config.PrinterConfig;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import org.jetbrains.annotations.Nullable;
 
 /** Prepared before movement; revalidated and sent after vanilla movement. */
 public final class NativePlacementAction extends Action {
@@ -36,6 +39,14 @@ public final class NativePlacementAction extends Action {
         this.stack = stack.copyWithCount(1);
         this.solution = solution;
         this.selectMaterial = selectMaterial;
+    }
+
+    /** A plain single-cell placement may follow a decoration if it never clicks the decoration. */
+    @Nullable
+    public BlockPos movablePlainBlockTarget(BlockPos decoration) {
+        if (desired.getBlock().getClass() != Block.class || stack.getItem().getClass() != BlockItem.class
+                || !stack.getComponentChanges().isEmpty() || solution.hit().getBlockPos().equals(decoration)) return null;
+        return target;
     }
 
     @Override

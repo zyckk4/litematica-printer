@@ -4,7 +4,7 @@ A Fabric printer extension for Litematica, optimized specifically for the curren
 2b2t server version and environment. This branch targets the **Minecraft 1.21.11 client** with
 native placement and movement handling, without a protocol downgrade.
 
-Version: **3.4.11**. The `1.21.11` branch contains the native implementation;
+Version: **3.4.11.2**. The `1.21.11` branch contains the native implementation;
 the earlier implementation is maintained separately on `1.21.4`.
 
 ## Features
@@ -32,7 +32,7 @@ Requirements:
 - [MaLiLib 0.27.20](https://modrinth.com/mod/malilib/version/loabWpyU).
 
 Place the original dependency JARs and
-`litematica-printer-3.4.11-mc1.21.11.jar` in your instance's `mods/` directory.
+`litematica-printer-3.4.11.2-mc1.21.11.jar` in your instance's `mods/` directory.
 Remove any older printer JAR first. Development `-named.jar` files are build
 inputs and must not be installed in the game.
 
@@ -151,8 +151,12 @@ other wall attachments when `printerIgnoreRotation` is enabled. If an earlier
 click in the batch could change a neighboring support, the printer waits for
 the server update and solves the placement again. Dry wall signs, ordinary
 torches and unpowered wall-mounted stone buttons can be placed next to each
-other in a batch when each click uses its own confirmed solid support. A click whose result depends
-on the server player's head angle waits for confirmation. Consecutive wall hanging
+other in a batch when each click uses its own confirmed solid support. With
+raycast disabled, the printer can place an already supported decoration before
+a neighboring plain block when the whole batch fits the remaining interaction
+budget. A decoration that needs a new support still waits for its server update.
+A click whose result depends on the
+server player's head angle waits for confirmation. Consecutive wall hanging
 signs can share a turn when their supports allow it. When a new turn is necessary,
 an increase in the player's server-side play time can confirm it before the next
 world time broadcast.
@@ -168,7 +172,7 @@ are not automatically repaired.
 Server updates and configuration can affect placement acceptance. The 2b2t
 optimization target does not guarantee compatibility with every server setup.
 
-## Remaining issues in 3.4.11
+## Remaining issues in 3.4.11.2
 
 | Area | Trigger and observed code behavior |
 | --- | --- |

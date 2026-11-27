@@ -10,6 +10,7 @@ import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
+import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.state.property.Properties;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
@@ -17,6 +18,9 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+
+import java.util.ArrayList;
+import java.util.List;
 
 final class AdjacentDecorationChecks {
     private static final BlockPos START = new BlockPos(-1, 65, 2);
@@ -32,6 +36,125 @@ final class AdjacentDecorationChecks {
             row(f, Blocks.STONE_BUTTON.getDefaultState().with(WallMountedBlock.FACE, BlockFace.WALL)
                     .with(Properties.HORIZONTAL_FACING, Direction.NORTH), Direction.NORTH);
             checkFallbacks(f);
+            for (var mount : List.of(WALL_SIGN, Blocks.TORCH.getDefaultState(),
+                    Blocks.WALL_TORCH.getDefaultState().with(Properties.HORIZONTAL_FACING, Direction.NORTH),
+                    Blocks.STONE_BUTTON.getDefaultState().with(WallMountedBlock.FACE, BlockFace.WALL)
+                            .with(Properties.HORIZONTAL_FACING, Direction.NORTH))) {
+                checkMixedBatch(f, mount, false);
+            }
+            checkMixedBatch(f, WALL_SIGN, true);
+            checkPartialBudget(f, 1, false);
+            checkPartialBudget(f, 2, false);
+            checkPartialBudget(f, 2, true);
+            checkPartialBudget(f, 3, true);
+        }
+    }
+
+    private static void checkPartialBudget(StateInteractionTestFixture f, int left, boolean rollingOnly) throws Exception {
+        f.reset();
+        f.setVelocity(Vec3d.ZERO);
+        f.configure(PrinterConfig.NATIVE_BURST, 9);
+        f.configure(PrinterConfig.INTERACTION_WINDOW_LIMIT, rollingOnly ? 9 : 64);
+        var mount = StateInteractionTestFixture.TARGET;
+        var foundation = mount.east();
+        var other = foundation.north();
+        var dependent = (left == 1 ? foundation : other).up();
+        f.world.blocks.put(mount.south(), Blocks.STONE.getDefaultState());
+        var states = List.of(Blocks.ANDESITE.getDefaultState(), WALL_SIGN, Blocks.GRANITE.getDefaultState());
+        var positions = List.of(foundation, mount, other);
+        for (int i = 0; i < positions.size(); i++) {
+            var stack = new ItemStack(states.get(i).getBlock(), 12);
+            f.player.inventory.main.set(2 + i, stack);
+            var solved = NativePlacementSolver.solveStationary(positions.get(i), states.get(i), stack, 4.5, true);
+            if (solved == null) throw new AssertionError("Missing budget fixture");
+            f.printer.addNativePlacement(positions.get(i), states.get(i), stack, solved);
+        }
+        var torch = Blocks.TORCH.getDefaultState();
+        var torches = new ItemStack(Blocks.TORCH, 12);
+        f.player.inventory.main.set(5, torches);
+        if (NativePlacementSolver.solveStationary(dependent, torch, torches, 4.5, true) != null) {
+            throw new AssertionError("Fourth target was placeable without its foundation");
+        }
+        // Intervening uses occur after planning. In one variant they only occupy the
+        // rolling window because the player has advanced to the next tick.
+        for (int i = left; i < 9; i++) {
+            if (!Printer.tryAcquirePlacementPacket()) throw new AssertionError("Could not consume test budget");
+        }
+        if (rollingOnly) f.player.age++;
+        var materials = new ArrayList<ItemStack>();
+        f.network.packetSink = packet -> {
+            if (packet instanceof PlayerInteractBlockC2SPacket) materials.add(f.player.getMainHandStack().copy());
+        };
+        MovementHandler.onMovementSent(f.player);
+        f.printer.flushNativePlacements();
+        var order = switch (left) {
+            case 1 -> List.of(0);
+            case 2 -> List.of(0, 2);
+            default -> List.of(1, 0, 2);
+        };
+        if (materials.size() != left) throw new AssertionError("Wrong number of interactions for budget " + left);
+        for (int i = 0; i < left; i++) {
+            int planned = order.get(i);
+            var packet = f.network.blockPackets.get(i);
+            var stack = materials.get(i);
+            var item = (BlockItem) stack.getItem();
+            var context = item.getPlacementContext(new ItemPlacementContext(f.player, Hand.MAIN_HAND, stack, packet.getBlockHitResult()));
+            var pos = positions.get(planned);
+            if (context == null || !pos.equals(context.getBlockPos()) || item.getPlacementState(context) != states.get(planned)) {
+                throw new AssertionError("Displaced foundation with budget " + left + " at packet " + i);
+            }
+            f.world.blocks.put(pos, states.get(planned));
+            Printer.confirmNativePlacement(pos, states.get(planned));
+            Printer.acknowledgeBlockActions(packet.getSequence());
+        }
+        f.configure(PrinterConfig.INTERACTION_WINDOW_LIMIT, 64);
+        f.player.age++;
+        f.schematic.blocks.put(dependent, torch);
+        f.printer.onGameTick();
+        MovementHandler.onMovementSent(f.player);
+        f.printer.flushNativePlacements();
+        if (materials.size() != left + 1 || materials.getLast().getItem() != torches.getItem()) {
+            throw new AssertionError("Fourth target did not unlock after its foundation arrived");
+        }
+    }
+
+    private static void checkMixedBatch(StateInteractionTestFixture f, BlockState mount, boolean loseSupport) throws Exception {
+        f.reset();
+        f.setVelocity(Vec3d.ZERO);
+        var target = StateInteractionTestFixture.TARGET;
+        var support = target.offset(NativeAttachment.decorationFace(mount).getOpposite());
+        var neighbor = target.east();
+        var stone = Blocks.ANDESITE.getDefaultState();
+        f.world.blocks.put(support, Blocks.STONE.getDefaultState());
+        var stones = new ItemStack(stone.getBlock(), 8);
+        var mounts = new ItemStack(mount.getBlock(), 8);
+        f.player.inventory.main.set(2, stones);
+        f.player.inventory.main.set(3, mounts);
+        var first = NativePlacementSolver.solveStationary(neighbor, stone, stones, 4.5, true);
+        var second = NativePlacementSolver.solveStationary(target, mount, mounts, 4.5, true);
+        if (first == null || second == null) throw new AssertionError("Missing mixed batch setup");
+        f.printer.addNativePlacement(neighbor, stone, stones, first);
+        f.printer.addNativePlacement(target, mount, mounts, second);
+        if (loseSupport) f.world.blocks.remove(support);
+        var wireItems = new ArrayList<ItemStack>();
+        f.network.packetSink = packet -> {
+            if (packet instanceof PlayerInteractBlockC2SPacket) wireItems.add(f.player.getMainHandStack().copy());
+        };
+        MovementHandler.onMovementSent(f.player);
+        f.printer.flushNativePlacements();
+        var expected = loseSupport ? List.of(stone) : List.of(mount, stone);
+        if (wireItems.size() != expected.size()) throw new AssertionError("Mixed batch did not finish: " + wireItems);
+        // Apply packets in server order. No block updates or ACKs were returned during the flush.
+        for (int i = 0; i < expected.size(); i++) {
+            var stack = wireItems.get(i);
+            var item = (BlockItem) stack.getItem();
+            var context = item.getPlacementContext(new ItemPlacementContext(f.player, Hand.MAIN_HAND, stack,
+                    f.network.blockPackets.get(i).getBlockHitResult()));
+            var pos = expected.get(i) == stone ? neighbor : target;
+            if (context == null || !context.getBlockPos().equals(pos) || item.getPlacementState(context) != expected.get(i)) {
+                throw new AssertionError("Invalid reordered placement at " + pos + " with " + stack);
+            }
+            f.world.blocks.put(pos, expected.get(i));
         }
     }
 

@@ -57,6 +57,7 @@ import java.util.Set;
 public class Printer {
     private static final float HANGING_SIGN_PITCH = 30.0F;
     private final List<Action> nativeActions = new ArrayList<>();
+    @Nullable private List<Action> originalNativeOrder;
     private int scanCursor;
     private int guideCursor;
     private int correctionCooldown;
@@ -138,6 +139,7 @@ public class Printer {
     public boolean onGameTick() {
         MovementHandler.beginPrinterTick();
         nativeActions.clear();
+        originalNativeOrder = null;
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
         tickPendingPlacements();
         blockPosTimeout.forEach((entry) -> entry.timer--);
@@ -370,7 +372,7 @@ public class Printer {
                 batchSolution = solution;
                 actionHandler.clearLookAction();
             }
-            addNativePlacement(target, desired, solution);
+            addNativePlacement(target.pos(), desired, target.stack(), solution);
             if (target.pos().equals(waitingForHead)) plannedPreferred = true;
             keep.add(target.stack());
             if (target.state().getBlock() instanceof ChestBlock) {
@@ -397,7 +399,7 @@ public class Printer {
             if (player.getAbilities().creativeMode) {
                 if (placementBudget && !hasBatch && inventoryManager.select(target.stack()) && prepareNativeRotation(solution)) {
                     actionHandler.clearLookAction();
-                    addNativePlacement(target, desired, solution);
+                    addNativePlacement(target.pos(), desired, target.stack(), solution);
                 }
                 break;
             }
@@ -465,9 +467,25 @@ public class Printer {
                 && MovementHandler.requestRotation(solution.yaw(), solution.pitch()));
     }
 
-    private void addNativePlacement(NativeTarget target, BlockState desired, NativePlacementSolver.Solution solution) {
+    void addNativePlacement(BlockPos target, BlockState desired, ItemStack stack, NativePlacementSolver.Solution solution) {
         BlockState actionTarget = NativeAttachment.hasFaces(desired) ? solution.predicted() : desired;
-        nativeActions.add(new NativePlacementAction(target.pos(), actionTarget, target.stack(), solution, true));
+        int index = nativeActions.size();
+        if (index > 0 && NativeAttachment.decorationFace(actionTarget) != null && !PrinterConfig.RAYCAST.getBooleanValue()) {
+            // The mount already works in the published world. Send it before an adjoining
+            // plain block would make that world uncertain. Keep other placements in order.
+            for (int i = index - 1; i >= 0 && nativeActions.get(i) instanceof NativePlacementAction prior; i--) {
+                BlockPos block = prior.movablePlainBlockTarget(target);
+                if (block == null) break;
+                if (block.getManhattanDistance(target) == 1) index = i;
+            }
+            if (index < nativeActions.size() && !hasFixedDecorationSupport(target, actionTarget, null, stack)) {
+                index = nativeActions.size();
+            }
+        }
+        if (index < nativeActions.size() && originalNativeOrder == null) originalNativeOrder = new ArrayList<>(nativeActions);
+        var action = new NativePlacementAction(target, actionTarget, stack, solution, true);
+        if (originalNativeOrder != null) originalNativeOrder.add(action);
+        nativeActions.add(index, action);
     }
 
     private record NativeTarget(BlockPos pos, BlockState state, ItemStack stack, int offset) {}
@@ -648,17 +666,25 @@ public class Printer {
     }
 
     public static boolean canAcquirePlacementPacket() {
+        return canAcquirePlacementPackets(1);
+    }
+
+    private static boolean canAcquirePlacementPackets(int count) {
         MinecraftClient client = MinecraftClient.getInstance();
         return client.player != null && placementRate.available(System.nanoTime(),
                 client.player.age, PrinterConfig.NATIVE_BURST.getIntegerValue(),
-                PrinterConfig.INTERACTION_WINDOW_MS.getIntegerValue(), PrinterConfig.INTERACTION_WINDOW_LIMIT.getIntegerValue());
+                PrinterConfig.INTERACTION_WINDOW_MS.getIntegerValue(), PrinterConfig.INTERACTION_WINDOW_LIMIT.getIntegerValue(), count);
     }
 
     /** Runs only after this tick's vanilla movement/rotation packet. */
     public void flushNativePlacements() {
         if (nativeActions.isEmpty()) return;
-        List<Action> batch = List.copyOf(nativeActions);
+        // A newly admitted decoration must not spend the last slot needed by an earlier
+        // foundation. Other printer interactions can spend budget after planning.
+        List<Action> batch = originalNativeOrder != null && !canAcquirePlacementPackets(nativeActions.size())
+                ? originalNativeOrder : List.copyOf(nativeActions);
         nativeActions.clear();
+        originalNativeOrder = null;
         if (!canRunActions(mc, player) || mc.getCameraEntity() != player
                 || mc.world != predictionWorld || player.hasVehicle()) return;
         for (Action action : batch) {
@@ -865,6 +891,7 @@ public class Printer {
 
     public void onServerCorrection() {
         nativeActions.clear();
+        originalNativeOrder = null;
         actionHandler.clear();
         MovementHandler.clearRotation();
         correctionCooldown = 5;
