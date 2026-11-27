@@ -74,6 +74,7 @@ public final class NativeRegressionChecks {
         AttachmentBatchChecks.run();
         NativeAttachmentStateChecks.run();
         NativeHeadRotationChecks.run();
+        SharedHangingSignChecks.run();
         System.out.println("Native attachment regressions passed.");
     }
 

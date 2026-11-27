@@ -19,6 +19,7 @@ import me.aleksilassila.litematica.printer.v1_21_11.actions.NativePlacementActio
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.block.AbstractRailBlock;
+import net.minecraft.block.Block;
 import net.minecraft.block.BedBlock;
 import net.minecraft.block.DoorBlock;
 import net.minecraft.block.FallingBlock;
@@ -27,6 +28,7 @@ import net.minecraft.block.ObserverBlock;
 import net.minecraft.block.PaleMossCarpetBlock;
 import net.minecraft.block.PitcherCropBlock;
 import net.minecraft.block.TallPlantBlock;
+import net.minecraft.block.WallHangingSignBlock;
 import net.minecraft.block.enums.BedPart;
 import net.minecraft.block.enums.DoubleBlockHalf;
 import net.minecraft.block.enums.WallShape;
@@ -35,6 +37,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec2f;
@@ -52,6 +55,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class Printer {
+    private static final float HANGING_SIGN_PITCH = 30.0F;
     private final List<Action> nativeActions = new ArrayList<>();
     private int scanCursor;
     private int guideCursor;
@@ -354,7 +358,12 @@ public class Printer {
             // Adjacent chests must be solved after the first server update.
             if (target.state().getBlock() instanceof ChestBlock && chestNeighbors.contains(target.pos())) continue;
             BlockState desired = NativePlacementSolver.placementTarget(mc.world, schematic, target.pos(), target.state());
-            NativePlacementSolver.Solution solution = solveNative(target, desired, moving, batchSolution);
+            NativePlacementSolver.Solution solution = null;
+            if (batchSolution == null && desired.getBlock() instanceof WallHangingSignBlock
+                    && PrinterConfig.PRINTER_GRIM_ROTATION.getBooleanValue()) {
+                solution = planHangingSignRotation(target, ready, moving);
+            }
+            if (solution == null) solution = solveNative(target, desired, moving, batchSolution);
             if (solution == null) continue;
             if (batchSolution == null) {
                 if (!inventoryManager.selectReadyNativeMaterial(target.stack()) || !prepareNativeRotation(solution)) continue;
@@ -398,6 +407,41 @@ public class Printer {
         }
         inventoryManager.stageMaterials(wanted, keep, !hasBatch && placementBudget);
         return !nativeActions.isEmpty();
+    }
+
+    @Nullable
+    private NativePlacementSolver.Solution planHangingSignRotation(NativeTarget first, List<NativeTarget> ready, boolean moving) {
+        // Preserve a pending or proven turn across scans, even with a burst size of one.
+        float heldYaw = NativeHeadRotation.heldYaw(player);
+        if (Float.isFinite(heldYaw) && MovementHandler.canRequestRotation(heldYaw, HANGING_SIGN_PITCH)) {
+            var held = solveHangingSignAt(first, heldYaw);
+            if (held != null) return held;
+        }
+        Direction facing = first.state().get(WallHangingSignBlock.FACING);
+        for (NativeTarget next : ready) {
+            if (next.offset() <= first.offset() || !(next.state().getBlock() instanceof WallHangingSignBlock)) continue;
+            Direction other = next.state().get(WallHangingSignBlock.FACING);
+            if (facing.getAxis() == other.getAxis()) continue;
+            // The clicked side chooses the axis. The head can face opposite both
+            // requested signs at once if the targets have reachable matching hits.
+            float yaw = (float) Math.toDegrees(Math.atan2(facing.getOffsetX() + other.getOffsetX(),
+                    -facing.getOffsetZ() - other.getOffsetZ()));
+            if (moving) {
+                float camera = player.getYaw();
+                yaw = MathHelper.wrapDegrees(camera + 45 * Math.round(MathHelper.wrapDegrees(yaw - camera) / 45));
+            }
+            if (!MovementHandler.canRequestRotation(yaw, HANGING_SIGN_PITCH)) return null;
+            var solution = solveHangingSignAt(first, yaw);
+            // Bound lookahead to one partner. Other candidates follow the regular scan budget.
+            return solution != null && solveHangingSignAt(next, yaw) != null ? solution : null;
+        }
+        return null;
+    }
+
+    @Nullable
+    private NativePlacementSolver.Solution solveHangingSignAt(NativeTarget target, float yaw) {
+        return NativePlacementSolver.solveMovingAtRotation(target.pos(), target.state(), target.stack(), getEffectivePrintingRange(),
+                PrinterConfig.PRINTER_NATIVE_OMNI.getBooleanValue(), player.isSprinting(), yaw, HANGING_SIGN_PITCH);
     }
 
     @Nullable
@@ -627,6 +671,10 @@ public class Printer {
 
     /** Track an attempt without inserting an unconfirmed block into the world. */
     public static void trackPlacement(BlockPos pos, BlockState desired, ItemStack stack, int sequence) {
+        trackPlacement(pos, desired, stack, sequence, null);
+    }
+
+    public static void trackPlacement(BlockPos pos, BlockState desired, ItemStack stack, int sequence, @Nullable BlockHitResult hit) {
         MinecraftClient client = MinecraftClient.getInstance();
         int latency = 0;
         if (client.getNetworkHandler() != null && client.player != null) {
@@ -637,6 +685,7 @@ public class Printer {
         // packets, with a bounded retry if no authoritative state arrives.
         int waitTicks = MathHelper.clamp((latency * 2 + 750) / 50, 15, 60);
         PendingPlacement pending = new PendingPlacement(desired, stack.copyWithCount(1), sequence, waitTicks);
+        pending.fixedDecoration = hit != null && sequence >= 0 && hasFixedDecorationSupport(pos, desired, hit, stack);
         pendingPlacements.put(pos.toImmutable(), pending);
         if (sequence >= 0 && stack.getItem() instanceof net.minecraft.item.BlockItem) {
             unacknowledgedBlocks.put(pos.toImmutable(), sequence);
@@ -680,12 +729,43 @@ public class Printer {
     }
 
     public static boolean hasUnsettledAttachmentNeighbor(BlockPos target, BlockState desired) {
+        return hasUnsettledAttachmentNeighbor(target, desired, null, null);
+    }
+
+    public static boolean hasUnsettledAttachmentNeighbor(BlockPos target, BlockState desired, @Nullable BlockHitResult hit,
+                                                          @Nullable ItemStack stack) {
         if (!NativeAttachment.isSensitive(desired)) return false;
+        boolean besideDecoration = false;
         for (Direction side : Direction.values()) {
             BlockPos neighbor = target.offset(side);
-            if (hasPendingPlacement(neighbor) || unacknowledgedBlocks.containsKey(neighbor)) return true;
+            PendingPlacement pending = pendingPlacements.get(neighbor);
+            if (unpublishedCompanions.containsKey(neighbor)) return true;
+            if (pending == null) {
+                if (unacknowledgedBlocks.containsKey(neighbor)) return true;
+            } else {
+                if (!pending.fixedDecoration) return true;
+                besideDecoration = true;
+            }
         }
-        return false;
+        // Planning can search for the explicit support. The send path checks the
+        // final wire hit again after revalidation, including a substituted hit.
+        return besideDecoration && !hasFixedDecorationSupport(target, desired, hit, stack);
+    }
+
+    private static boolean hasFixedDecorationSupport(BlockPos target, BlockState desired, @Nullable BlockHitResult hit,
+                                                      @Nullable ItemStack stack) {
+        Direction face = NativeAttachment.decorationFace(desired);
+        if (face == null || PrinterConfig.RAYCAST.getBooleanValue()) return false;
+        if (hasPendingPlacement(target) || unacknowledgedBlocks.containsKey(target)) return false;
+        if (stack != null && (!stack.isOf(desired.getBlock().asItem()) || !stack.getComponentChanges().isEmpty())) return false;
+        BlockPos support = target.offset(face.getOpposite());
+        if (hit != null && (hit.getSide() != face || !support.equals(hit.getBlockPos()))) return false;
+        if (hasPendingPlacement(support) || unacknowledgedBlocks.containsKey(support)) return false;
+        var world = MinecraftClient.getInstance().world;
+        if (world == null || !world.getBlockState(target).isAir()) return false;
+        BlockState anchor = world.getBlockState(support);
+        return anchor.getBlock().getClass() == Block.class && !anchor.isReplaceable()
+                && anchor.getFluidState().isEmpty() && anchor.isFullCube(world, support);
     }
 
     public static void acknowledgeBlockActions(int sequence) {
@@ -799,6 +879,7 @@ public class Printer {
         private int stockCheckTick;
         private boolean blockPublished;
         private boolean stockPublished;
+        private boolean fixedDecoration;
 
         private PendingPlacement(BlockState desired, ItemStack stack, int sequence, int ticks) {
             this.desired = desired;

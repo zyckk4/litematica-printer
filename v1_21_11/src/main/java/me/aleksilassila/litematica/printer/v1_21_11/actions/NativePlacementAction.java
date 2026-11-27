@@ -42,9 +42,6 @@ public final class NativePlacementAction extends Action {
     public boolean send(MinecraftClient client, ClientPlayerEntity player) {
         if (client.world == null || client.interactionManager == null || client.getNetworkHandler() == null
                 || Printer.hasPendingPlacement(target)) return false;
-        // Earlier actions in this same flush have reached the wire, but their
-        // blocks aren't in the client world used by placement revalidation yet.
-        if (Printer.hasUnsettledAttachmentNeighbor(target, desired)) return false;
         if (selectMaterial && !Printer.inventoryManager.selectReadyNativeMaterial(stack)) return false;
         if (!Printer.inventoryManager.canUseSelectedSlot(player)) return false;
         ItemStack held = player.getMainHandStack();
@@ -53,7 +50,7 @@ public final class NativePlacementAction extends Action {
         double reach = Math.min(LitematicaMixinMod.PRINTING_RANGE.getDoubleValue(), player.getBlockInteractionRange());
         NativePlacementSolver.Solution checked = NativePlacementSolver.revalidate(target, desired, held, solution,
                 reach, MovementHandler.sentYaw(player.getYaw()), MovementHandler.sentPitch(player.getPitch()));
-        if (checked == null) return false;
+        if (checked == null || Printer.hasUnsettledAttachmentNeighbor(target, desired, checked.hit(), held)) return false;
         if (!NativePlacementSolver.independentOfHeadYaw(target, held, checked)
                 && !NativeHeadRotation.ready(player, target, checked.yaw())) return false;
         if (!Printer.tryAcquirePlacementPacket()) return false;
@@ -63,7 +60,7 @@ public final class NativePlacementAction extends Action {
         if (swap) swapHands(client);
         try {
             client.interactionManager.sendSequencedPacket(client.world, sequence -> {
-                Printer.trackPlacement(target, checked.predicted(), stack, sequence);
+                Printer.trackPlacement(target, checked.predicted(), stack, sequence, checked.hit());
                 return new PlayerInteractBlockC2SPacket(hand, checked.hit(), sequence);
             });
         } finally {

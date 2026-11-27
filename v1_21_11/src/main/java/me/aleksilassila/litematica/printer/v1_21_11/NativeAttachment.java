@@ -4,10 +4,25 @@ import net.minecraft.block.*;
 import net.minecraft.block.enums.Attachment;
 import net.minecraft.block.enums.BlockFace;
 import net.minecraft.item.VerticallyAttachableBlockItem;
+import net.minecraft.state.property.Properties;
+import net.minecraft.util.math.Direction;
+import org.jetbrains.annotations.Nullable;
 
 /** Mounts whose placement can change when another support becomes available. */
 final class NativeAttachment {
     private NativeAttachment() {}
+
+    /** These vanilla single-cell decorations take the clicked support first. */
+    @Nullable
+    static Direction decorationFace(BlockState state) {
+        Class<?> block = state.getBlock().getClass();
+        if ((block == WallSignBlock.class && !state.get(Properties.WATERLOGGED)) || block == WallTorchBlock.class
+                || (state.isOf(Blocks.STONE_BUTTON) && state.get(WallMountedBlock.FACE) == BlockFace.WALL
+                    && !state.get(ButtonBlock.POWERED))) {
+            return state.get(Properties.HORIZONTAL_FACING);
+        }
+        return block == TorchBlock.class ? Direction.UP : null;
+    }
 
     static boolean isSensitive(BlockState state) {
         Block block = state.getBlock();

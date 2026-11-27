@@ -25,6 +25,11 @@ public final class NativeHeadRotation {
         return owner == player && world == player.getEntityWorld() ? waitingTarget : null;
     }
 
+    static float heldYaw(ClientPlayerEntity player) {
+        return owner == player && world == player.getEntityWorld() && player.networkHandler == connection
+                && InventoryFenceOrder.get(connection).holdsRotation(marker) ? yaw : Float.NaN;
+    }
+
     public static void holdBetweenScans(ClientPlayerEntity player) {
         if (preferredTarget(player) != null) {
             MovementHandler.requestRotation(yaw, player.getPitch());
@@ -51,17 +56,23 @@ public final class NativeHeadRotation {
                 marker = null;
                 return false;
             }
-            marker = order.expectRotation(yaw);
-            network.sendPacket(marker);
+            marker = order.expectRotation(yaw, player.age);
+            if (marker != null) network.sendPacket(marker);
         } else if (!settled && waitingTarget == null) {
             waitingTarget = target.toImmutable();
         }
-        return settled;
+        return settled || order.hasPlayerTick(marker);
     }
 
     static void onMovementSent(ClientPlayerEntity player, float sentYaw) {
-        if (owner != null && (owner != player || world != player.getEntityWorld()
-                || MathHelper.wrapDegrees(sentYaw - yaw) != 0)) clear();
+        if (owner == null) return;
+        if (owner != player || world != player.getEntityWorld() || player.networkHandler != connection
+                || MathHelper.wrapDegrees(sentYaw - yaw) != 0) {
+            clear();
+        } else if (!settled && waitingTarget != null) {
+            var probe = InventoryFenceOrder.get(connection).followUp(marker, player.age);
+            if (probe != null) connection.sendPacket(probe);
+        }
     }
 
     public static void placed(BlockPos target) {

@@ -27,6 +27,7 @@ import net.minecraft.world.dimension.DimensionTypes;
 
 final class AttachmentBatchChecks {
     static void run() throws Exception {
+        AdjacentDecorationChecks.run();
         try (var f = new StateInteractionTestFixture()) {
             f.setVelocity(Vec3d.ZERO);
             f.configure(PrinterConfig.PRINTER_GRIM_ROTATION, true);

@@ -9,6 +9,7 @@ import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.stat.Stats;
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.InventoryS2CPacket;
@@ -67,7 +68,8 @@ public class NativePlacementNetworkMixin implements InventoryFenceOrder.Access {
 
     @Inject(method = "onStatistics", at = @At("TAIL"))
     private void printer$inventoryReadbackFence(StatisticsS2CPacket packet, CallbackInfo ci) {
-        Printer.inventoryManager.onInventoryReadbackBarrier((ClientPlayNetworkHandler) (Object) this);
+        int playTime = packet.stats().getOrDefault(Stats.CUSTOM.getOrCreateStat(Stats.PLAY_TIME), -1);
+        Printer.inventoryManager.onInventoryReadbackBarrier((ClientPlayNetworkHandler) (Object) this, playTime);
     }
 
     @Inject(method = "onWorldTimeUpdate", at = @At("TAIL"))

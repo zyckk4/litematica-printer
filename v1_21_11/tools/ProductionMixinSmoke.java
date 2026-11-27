@@ -50,6 +50,7 @@ public final class ProductionMixinSmoke {
                 {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$inventorySlot"},
                 {"net.minecraft.client.network.ClientPlayNetworkHandler", "printer$fullInventory"},
                 {"net.minecraft.network.ClientConnection", "printer$recordStatisticsWrite"},
+                {"net.minecraft.network.ClientConnection", "printer$invalidateQueuedLook"},
                 {"net.minecraft.client.render.Camera", "onUpdateSetRotationArgs"},
                 {"net.minecraft.client.Mouse", "updateMouseChangeLookDirection"},
                 {"net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket", "modifyLookYaw"},
